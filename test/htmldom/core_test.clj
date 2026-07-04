@@ -117,3 +117,52 @@
     (is (= "a" text))
     (is (= :p (:tag p)))
     (is (= ["after"] (:children p)))))
+
+(deftest title-content-is-raw-text-not-markup
+  ;; A `<title>` body containing `<`/`>` must not be interpreted as markup:
+  ;; only the real closing `</title>` terminates it, and `<p>` lands as a
+  ;; genuine following sibling, not nested inside a still-open `<title>`.
+  (let [document (html/parse-into-document "<title>A < B</title><p>after</p>")
+        tree (dom/tree document)
+        [title p] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :title (:tag title)))
+    (is (= ["A < B"] (:children title)))
+    (is (= :p (:tag p)))
+    (is (= ["after"] (:children p)))))
+
+(deftest textarea-content-is-raw-text-not-markup
+  ;; Same raw-text handling applies to `<textarea>`: code-like default text
+  ;; containing `<`/`>` must not corrupt the rest of the document.
+  (let [document (html/parse-into-document
+                  "<textarea>if (1 < 2) { x(); }</textarea><p>after</p>")
+        tree (dom/tree document)
+        [textarea p] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :textarea (:tag textarea)))
+    (is (= ["if (1 < 2) { x(); }"] (:children textarea)))
+    (is (= :p (:tag p)))
+    (is (= ["after"] (:children p)))))
+
+(deftest textarea-content-that-looks-like-a-tag-is-one-literal-text-child
+  ;; A textarea's content is never real markup, no matter what it looks
+  ;; like: a substring that resembles a `<b>...</b>` element must become a
+  ;; single literal text child, not a parsed `<b>` element.
+  (let [document (html/parse-into-document
+                  "<textarea><b>not a real tag</b></textarea>")
+        tree (dom/tree document)
+        textarea (first (:children tree))]
+    (is (= :textarea (:tag textarea)))
+    (is (= 1 (count (:children textarea))))
+    (is (= "<b>not a real tag</b>" (first (:children textarea))))))
+
+(deftest textarea-default-value-reflects-full-raw-text-content
+  ;; The form-default-value projection (`initialize-form-node`'s `:textarea`
+  ;; case) must see the full, unmangled raw text as the textarea's content
+  ;; -- not a fragment truncated by a `<`/`>` inside it.
+  (let [document (html/parse-into-document
+                  "<textarea>if (1 < 2) { x(); }</textarea>")
+        root (dom/node document (:root document))
+        textarea (dom/node document (first (:children root)))]
+    (is (= "if (1 < 2) { x(); }" (get-in textarea [:attrs :value])))
+    (is (= "if (1 < 2) { x(); }" (get-in textarea [:attrs :default-value])))))

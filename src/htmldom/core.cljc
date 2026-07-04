@@ -61,8 +61,16 @@
 (def ^:private raw-text-tags
   "Elements whose content real HTML parsers scan as literal raw text rather
    than markup: `<`/`>`/quotes inside them are not interpreted, and only the
-   first matching end tag terminates them."
-  #{"script" "style"})
+   first matching end tag terminates them.
+
+   `script`/`style` are true \"raw text\" elements per the WHATWG spec.
+   `title`/`textarea` are technically \"RCDATA\" -- the one difference being
+   that character references (e.g. `&amp;`) are still decoded inside RCDATA.
+   This project does not do HTML entity decoding anywhere yet (a separate,
+   out-of-scope gap), so that distinction is a no-op here: all four tags get
+   identical literal-scan treatment, which matches real-parser behavior for
+   everything this parser currently does."
+  #{"script" "style" "title" "textarea"})
 
 (defn- raw-text-tag-name
   "If html[lt..gt] (inclusive angle brackets, gt = index of the tag's '>')
