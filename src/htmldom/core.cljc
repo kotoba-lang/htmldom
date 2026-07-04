@@ -58,12 +58,96 @@
       (when-not (str/blank? text)
         {:type :text :text text}))))
 
+(def ^:private raw-text-tags
+  "Elements whose content real HTML parsers scan as literal raw text rather
+   than markup: `<`/`>`/quotes inside them are not interpreted, and only the
+   first matching end tag terminates them."
+  #{"script" "style"})
+
+(defn- raw-text-tag-name
+  "If html[lt..gt] (inclusive angle brackets, gt = index of the tag's '>')
+   opens a raw-text element, return its lower-cased tag name. Returns nil for
+   closing tags, comments/doctypes/PIs, and any ordinary element."
+  [html lt gt]
+  (let [body (str/trim (subs html (inc lt) gt))]
+    (when-not (or (str/starts-with? body "/")
+                  (str/starts-with? body "!")
+                  (str/starts-with? body "?"))
+      (raw-text-tags (str/lower-case (first (str/split body #"[\s/>]" 2)))))))
+
+(defn- raw-text-close-index
+  "Index of the '<' beginning the literal, case-insensitive closing tag
+   `</tag` for `tag`, scanned from `from` in `html`. Matches real raw-text
+   parsing: any '<'/'>' or nested same-name start tag in between is ignored,
+   only the first end-tag boundary terminates the element. Returns
+   (count html) if unterminated (rest of input becomes the element's text,
+   as browsers do for an unterminated <script>/<style> at EOF)."
+  [html tag from]
+  (let [lower (str/lower-case html)
+        len (count html)
+        needle (str "</" (str/lower-case tag))
+        needle-len (count needle)
+        boundary-chars #{" " "\t" "\n" "\r" ">" "/"}]
+    (loop [pos from]
+      (if-let [idx (str/index-of lower needle pos)]
+        (let [after (+ idx needle-len)]
+          (if (or (>= after len)
+                  (contains? boundary-chars (subs lower after (inc after))))
+            idx
+            (recur (inc idx))))
+        len))))
+
 (defn tokenize
   [html]
-  (->> (re-seq #"(?s)<[^>]+>|[^<]+" (or html ""))
-       (keep #(when-not (or (str/starts-with? % "<!")
-                            (str/starts-with? % "<?"))
-                (token %)))))
+  (let [html (or html "")
+        len (count html)]
+    (loop [pos 0
+           acc []]
+      (let [lt (or (str/index-of html "<" pos) len)
+            acc (if (> lt pos)
+                  (if-let [t (token (subs html pos lt))]
+                    (conj acc t)
+                    acc)
+                  acc)]
+        (cond
+          (>= lt len)
+          acc
+
+          ;; HTML comment: scanned literally for its real `-->` terminator so
+          ;; a `>` inside the comment body can't truncate it and corrupt the
+          ;; rest of the token stream. Comments produce no token (discarded),
+          ;; matching prior behavior.
+          (str/starts-with? (subs html lt) "<!--")
+          (let [end (str/index-of html "-->" (+ lt 4))]
+            (recur (if end (+ end 3) len) acc))
+
+          :else
+          (let [gt (str/index-of html ">" lt)]
+            (if (nil? gt)
+              ;; No terminating '>' anywhere in the rest of the input: drop
+              ;; this lone '<' (matches the old regex tokenizer's lenient
+              ;; behavior of silently skipping an unmatched '<') and continue.
+              (recur (inc lt) acc)
+              (let [raw (subs html lt (inc gt))]
+                (if (or (str/starts-with? raw "<!") (str/starts-with? raw "<?"))
+                  ;; doctype / processing instruction: discarded, as before.
+                  (recur (inc gt) acc)
+                  (let [raw-tag (raw-text-tag-name html lt gt)
+                        open-tok (token raw)]
+                    (if (and raw-tag (not (:self? open-tok)))
+                      ;; Raw-text element: emit its real opening tag, then the
+                      ;; verbatim (whitespace-preserving) text up to the real
+                      ;; closing tag, then the real closing tag itself.
+                      (let [close-idx (raw-text-close-index html raw-tag (inc gt))
+                            text (subs html (inc gt) close-idx)
+                            acc (cond-> acc open-tok (conj open-tok))
+                            acc (if (seq text) (conj acc {:type :text :text text}) acc)]
+                        (if (< close-idx len)
+                          (let [close-gt (or (str/index-of html ">" close-idx) len)]
+                            (recur (if (< close-gt len) (inc close-gt) len)
+                                   (conj acc {:type :end :tag raw-tag})))
+                          (recur len acc)))
+                      (recur (inc gt) (if open-tok (conj acc open-tok) acc)))))))))))))
 
 (defn- apply-attrs
   [document id attrs]
@@ -202,6 +286,18 @@
           document
           (sort (keys (:nodes document)))))
 
+(defn- find-top-match-index
+  "Index within `stack` (a vector of open element ids, index 0 = root) of the
+   nearest (topmost) element whose tag is `tag`, searching from the top of
+   the stack downward but never matching the root at index 0. Returns nil if
+   no open element with that tag exists (a stray/mismatched closing tag)."
+  [document stack tag]
+  (loop [i (dec (count stack))]
+    (when (pos? i)
+      (if (= tag (get-in document [:nodes (nth stack i) :tag]))
+        i
+        (recur (dec i))))))
+
 (defn parse-into-document
   [html]
   (let [[root-id document] (dom/create-element dom/empty-document :document)
@@ -223,9 +319,10 @@
             (recur document (if self? stack (conj stack id)) (next tokens)))
 
           :end
-          (recur document
-                 (if (> (count stack) 1) (pop stack) stack)
-                 (next tokens))
+          (let [match-idx (find-top-match-index document stack (keyword tag))]
+            (recur document
+                   (if match-idx (subvec stack 0 match-idx) stack)
+                   (next tokens)))
 
           (recur document stack (next tokens)))
         (initialize-form-defaults document)))))
