@@ -3,7 +3,7 @@
 Small trusted-HTML-subset parser that bridges HTML-like markup into a
 `kotoba.wasm.dom` document (`htmldom.core/parse-into-document`).
 
-Split out of `kotoba-lang/browser` (ADR-2607041700), where it lived as
+Split out of `kotoba-lang/browser` (ADR-2607051100), where it lived as
 `browser.html`.
 
 **Not to be confused with `kotoba-lang/html`**, an unrelated
