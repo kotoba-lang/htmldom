@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/wasm-ui {:local/root "../wasm-ui"}}
+ :deps {io.github.kotoba-lang/dom-gpu {:local/root "../dom-gpu"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
