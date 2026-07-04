@@ -33,11 +33,86 @@
                    [(keyword k) (parse-style-value v)]))))
        (into {})))
 
+(def ^:private named-char-refs
+  "A small, pragmatic subset of HTML5 named character references: the five
+   XML-predefined entities (universally supported, unambiguous, no lookup
+   table strictly needed) plus a handful of the other named entities most
+   likely to show up in real-world text content. This is deliberately NOT the
+   full ~2000-entry HTML5 named character reference table -- implementing
+   that would be wildly out of scope for a trusted-HTML-subset parser. Any
+   named entity not in this table is left as literal text (`&foo;` stays
+   `&foo;`) rather than guessed at, matching this project's existing
+   degrade-don't-guess convention (see `parse-style-value`'s handling of
+   unsupported CSS values)."
+  {"amp" "&" "lt" "<" "gt" ">" "quot" "\"" "apos" "'"
+   "nbsp" "\u00A0" "copy" "\u00A9" "reg" "\u00AE" "trade" "\u2122"
+   "mdash" "\u2014" "ndash" "\u2013" "hellip" "\u2026"})
+
+(defn- codepoint->str
+  "A Unicode codepoint (possibly outside the BMP, e.g. an emoji) as a string,
+   correctly emitted as a surrogate pair where needed."
+  [cp]
+  #?(:clj (String. (Character/toChars (int cp)))
+     :cljs (js/String.fromCodePoint cp)))
+
+(defn- numeric-char-ref->str
+  "Decode the digits of a numeric character reference (`radix` 10 or 16) to
+   the corresponding Unicode codepoint's string, or nil if the digits don't
+   parse or name a codepoint outside the valid Unicode range (including the
+   surrogate-only range, which is never a valid scalar value) -- callers fall
+   back to leaving the reference as literal text, same as an unrecognized
+   named entity."
+  [digits radix]
+  (try
+    (let [cp #?(:clj (Long/parseLong digits radix) :cljs (js/parseInt digits radix))]
+      (when (and (<= 0 cp 0x10FFFF) (not (<= 0xD800 cp 0xDFFF)))
+        (codepoint->str cp)))
+    (catch #?(:clj Exception :cljs :default) _ nil)))
+
+(def ^:private char-ref-pattern
+  ;; Named references require the trailing `;` (see decode-entities'
+  ;; docstring for why). Numeric references' trailing `;` is optional: unlike
+  ;; named entities, a numeric reference is self-delimiting by digit class,
+  ;; so no lookup table is needed to know where it ends, and real browsers
+  ;; accept it either way.
+  #"&(?:([a-zA-Z][a-zA-Z0-9]*);|#(\d+);?|#[xX]([0-9a-fA-F]+);?)")
+
+(defn decode-entities
+  "Decode HTML character references in `s`: named entities (a pragmatic
+   subset, see `named-char-refs`) and numeric character references
+   (`&#65;` decimal, `&#x41;`/`&#X41;` hex) to their Unicode codepoint.
+
+   Simplification (documented, deliberate): a named reference's trailing `;`
+   is required -- omitting it is genuinely ambiguous without the full
+   ~2000-entry HTML5 named character reference table this project doesn't
+   implement (e.g. is `&notit` a truncated `&not;it` or literally `&notit`?).
+   A numeric reference's trailing `;` is optional, since digits are
+   self-delimiting (no ambiguity, so no reason to be stricter than browsers
+   are). Anything not recognized -- an unknown named entity, or numeric
+   digits naming an invalid codepoint -- is left as literal, unmodified text
+   rather than guessed at, matching this project's degrade-don't-guess
+   convention."
+  [s]
+  (if (or (nil? s) (not (str/index-of s "&")))
+    s
+    (str/replace
+     s
+     char-ref-pattern
+     (fn [[whole named decimal hex]]
+       (or (cond
+             named (get named-char-refs named)
+             decimal (numeric-char-ref->str decimal 10)
+             hex (numeric-char-ref->str hex 16))
+           whole)))))
+
 (defn- attrs
   [s]
   (->> (re-seq #"([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>/]+)))?" s)
        (map (fn [[_ k dq sq bare]]
-              [(keyword (str/lower-case k)) (or dq sq bare true)]))
+              [(keyword (str/lower-case k))
+               (if-let [v (or dq sq bare)]
+                 (decode-entities v)
+                 true)]))
        (into {})))
 
 (defn- token
@@ -56,7 +131,7 @@
         {:type :start :tag tag :attrs (attrs (or attr-text "")) :self? self?}))
     (let [text (str/replace raw #"\s+" " ")]
       (when-not (str/blank? text)
-        {:type :text :text text}))))
+        {:type :text :text (decode-entities text)}))))
 
 (def ^:private raw-text-tags
   "Elements whose content real HTML parsers scan as literal raw text rather
@@ -65,12 +140,21 @@
 
    `script`/`style` are true \"raw text\" elements per the WHATWG spec.
    `title`/`textarea` are technically \"RCDATA\" -- the one difference being
-   that character references (e.g. `&amp;`) are still decoded inside RCDATA.
-   This project does not do HTML entity decoding anywhere yet (a separate,
-   out-of-scope gap), so that distinction is a no-op here: all four tags get
-   identical literal-scan treatment, which matches real-parser behavior for
-   everything this parser currently does."
+   that character references (e.g. `&amp;`) are still decoded inside RCDATA
+   even though tags aren't parsed there either. See `rcdata-tags` for where
+   that distinction is now applied (tokenize decodes entities in the raw text
+   it captures only for the tags in that subset)."
   #{"script" "style" "title" "textarea"})
+
+(def ^:private rcdata-tags
+  "The subset of `raw-text-tags` that are \"RCDATA\" rather than true \"raw
+   text\" per the WHATWG spec: `title`/`textarea`. Tags are not parsed inside
+   either kind of element (both are scanned literally up to their real
+   closing tag), but character references ARE decoded inside RCDATA and are
+   NOT decoded inside true raw text. `script`/`style` are true raw text: a JS
+   string literal or CSS content containing `&amp;` is genuinely raw and must
+   not become `&`."
+  #{"title" "textarea"})
 
 (defn- raw-text-tag-name
   "If html[lt..gt] (inclusive angle brackets, gt = index of the tag's '>')
@@ -148,6 +232,14 @@
                       ;; closing tag, then the real closing tag itself.
                       (let [close-idx (raw-text-close-index html raw-tag (inc gt))
                             text (subs html (inc gt) close-idx)
+                            ;; RCDATA (title/textarea): entities decode even
+                            ;; though tags don't parse. True raw text
+                            ;; (script/style): verbatim, no decoding -- a JS
+                            ;; string literal containing `&amp;` must stay
+                            ;; `&amp;`, not become `&`.
+                            text (if (contains? rcdata-tags raw-tag)
+                                   (decode-entities text)
+                                   text)
                             acc (cond-> acc open-tok (conj open-tok))
                             acc (if (seq text) (conj acc {:type :text :text text}) acc)]
                         (if (< close-idx len)
