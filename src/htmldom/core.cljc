@@ -4,7 +4,7 @@
    This intentionally does not claim WHATWG HTML compatibility. It only bridges
    simple HTML-like documents into kotoba.wasm.dom.
 
-   Split out of kotoba-lang/browser (ADR-2607051100). Not to be confused with
+   Split out of kotoba-lang/browser (ADR-2607051140). Not to be confused with
    kotoba-lang/html, an unrelated Hiccup-compatible EDN HTML renderer (data ->
    HTML text); this namespace goes the other direction: parses HTML text into
    a kotoba.wasm.dom document."
