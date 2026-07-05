@@ -463,26 +463,85 @@
              definition-list pattern (`<dl><dt>term<dd>def<dt>term<dd>def</dl>`,
              no explicit </dt>/</dd>); nothing broader (e.g. <dt>/<dd> mixed
              with unrelated flow content) is in scope.
+     :tr     a new <tr> closes a currently open <tr>. Real HTML5's rule is
+             \"may be omitted if the tr element is immediately followed by
+             another tr element, or if there is no more content in the
+             parent element\" -- same shape as <li>, and the \"no more
+             content in parent\" half is likewise free via the `:end` case.
+     :td/:th table CELLS cross-close each other, same shape as <dt>/<dd>,
+             PLUS a new <tr> also closes a currently open cell -- real
+             HTML5: a <td>'s end tag \"may be omitted if the td element is
+             immediately followed by a td or th element, __or if there is
+             no more content in the parent tr element__\"; a <th>'s end tag
+             has the identical shape. This engine has no explicit
+             \"no more content in parent\" check the way the `:end` case
+             gives that for free elsewhere (a new <tr> is itself a START
+             tag, not the parent's end tag) -- so unlike every other entry
+             in this table, a new <tr> is included in <td>/<th>'s own
+             trigger sets below (`#{:td :th :tr}`) specifically to cover
+             that \"no more content\" half via the CASCADING pop this
+             table's consumer (`parse-into-document`'s `:start` case) now
+             performs: closing the open cell first exposes the enclosing
+             <tr> as the new stack top, which <tr>'s OWN entry then also
+             matches against the same incoming <tr> tag, closing that too.
+             This is the single most common real-world table pattern
+             (`<table><tr><td>A<td>B<tr><td>C</table>`, no explicit
+             </td>/</tr>) -- a genuinely severe gap before this entry
+             existed: without it, every cell after the first nested one
+             INSIDE the previous cell, and every row after the first nested
+             one inside the previous row's last cell, corrupting the whole
+             table's tree shape (confirmed by direct reproduction before
+             this fix, including the specific two-level cascading failure
+             mode: closing just the cell without also cascading into the
+             row left every row after the first still wrongly nested inside
+             the previous row's last cell). Implicit <tbody>/<thead>/<tfoot>
+             insertion and their own optional end tags are NOT in scope -- a
+             real, further gap, but a materially rarer real-world omission
+             than bare <tr>/<td>/<th>.
 
-   Deliberately NOT scanned up the stack: only the top of the stack (the
-   innermost currently-open element) is ever checked, matching the
-   \"immediately followed by\"/\"most recent\" framing above. This matters
-   for correctness, not just simplicity -- e.g. a new <li> that opens inside
-   a nested <ul> which itself sits inside an outer, still-open <li> (a
-   normal nested list) must NOT reach past the nested <ul> to close the
-   outer <li>. It doesn't: the nested <ul> occupies the top of the stack at
-   that point, not the outer <li>, so the outer <li> is never even
-   examined. Same reasoning applies to the cross-closing <dt>/<dd> pair: a
-   <dt> opening inside a nested <dl> (itself inside an outer, still-open
-   <dd> or <dt>) must NOT reach past the nested <dl> to cross-close the
-   outer <dt>/<dd> it doesn't actually follow. It doesn't, for the same
-   reason -- the nested <dl> occupies the top of the stack, not the outer
-   <dt>/<dd>."
+   Deliberately NOT scanned up the stack in a single check: only the TOP of
+   the stack is ever examined at each step, matching the \"immediately
+   followed by\"/\"most recent\" framing above -- but `parse-into-document`
+   now REPEATS that single-top check in a loop, re-examining whatever new
+   tag is exposed after each pop, so a chain of matches (like <td>/<th> then
+   <tr>) can cascade while a chain that stops matching (like <td>/<th> then
+   whatever <tr>'s own PARENT is) correctly halts after the first pop. This
+   still matters for correctness, not just simplicity -- e.g. a new <li>
+   that opens inside a nested <ul> which itself sits inside an outer,
+   still-open <li> (a normal nested list) must NOT reach past the nested
+   <ul> to close the outer <li>. It doesn't: the nested <ul> is never a key
+   in this table at all, so the loop halts there regardless of how many
+   iterations it's allowed. Same reasoning applies to the cross-closing
+   <dt>/<dd> and <td>/<th> pairs, and to the new <td>/<th>->cascading-into-
+   <tr> chain: a <td> opening inside a NESTED <table> (itself inside an
+   outer, still-open <td>/<th> -- a real, if unusual, shape) must not reach
+   past the nested <table> to cross-close the outer cell/row. It doesn't,
+   for the same reason -- <table> is never a key here, so the loop halts
+   the moment the nested <table> is exposed as the new top, regardless of
+   how many cascading pops preceded it."
   {:li #{:li}
    :option #{:option}
    :p #{:p}
    :dt #{:dt :dd}
-   :dd #{:dt :dd}})
+   :dd #{:dt :dd}
+   :tr #{:tr}
+   :td #{:td :th :tr}
+   :th #{:td :th :tr}})
+
+(defn- auto-close-stack
+  "Repeatedly pops `stack` while the CURRENT top's tag is closeable by the
+   incoming `tag-kw` per `auto-close-tags` (see that var's docstring for
+   why a single check isn't enough for the <td>/<th>->cascading-into-<tr>
+   chain), re-examining whatever new top each pop exposes. Never pops the
+   root (index 0). A tag with no cascading partner (li/option/p/dt/dd)
+   still only ever pops once, since none of THEIR parents are themselves
+   keys in `auto-close-tags`."
+  [document stack tag-kw]
+  (loop [stack stack]
+    (if (and (> (count stack) 1)
+             (contains? (auto-close-tags (get-in document [:nodes (peek stack) :tag])) tag-kw))
+      (recur (pop stack))
+      stack)))
 
 (defn parse-into-document
   [html]
@@ -499,17 +558,15 @@
 
           :start
           (let [tag-kw (keyword tag)
-                ;; Optional-end-tag auto-closing (see `auto-close-tags`): if
-                ;; the innermost currently-open element (top of the stack)
-                ;; is one this new start tag implicitly closes -- e.g. a new
-                ;; <li> while an <li> is already open -- pop it first, as if
-                ;; a real closing tag for it had just appeared. Never pops
-                ;; the root (index 0).
-                top-tag (get-in document [:nodes (peek stack) :tag])
-                stack (if (and (> (count stack) 1)
-                               (contains? (auto-close-tags top-tag) tag-kw))
-                        (pop stack)
-                        stack)
+                ;; Optional-end-tag auto-closing (see `auto-close-tags`/
+                ;; `auto-close-stack`): if the innermost currently-open
+                ;; element (top of the stack) is one this new start tag
+                ;; implicitly closes -- e.g. a new <li> while an <li> is
+                ;; already open -- pop it first, as if a real closing tag
+                ;; for it had just appeared, cascading through further pops
+                ;; when the newly-exposed top ALSO matches (e.g. a new <tr>
+                ;; closing an open <td> then also the enclosing <tr>).
+                stack (auto-close-stack document stack tag-kw)
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)

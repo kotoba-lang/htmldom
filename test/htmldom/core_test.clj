@@ -570,3 +570,90 @@
     (is (= 2 (count (:children dl))))
     (is (= :dt (:tag dt))) (is (= ["term"] (:children dt)))
     (is (= :dd (:tag dd))) (is (= ["def"] (:children dd)))))
+
+(deftest table-rows-and-cells-without-closing-tags-produce-flat-siblings
+  ;; The confirmed repro from the bug report: without this fix, every cell
+  ;; after the first nested INSIDE the previous cell, and every row after
+  ;; the first nested inside the previous row's last cell. A real <tr>
+  ;; auto-close needs to CASCADE through a still-open <td>/<th> first (the
+  ;; single-pop mechanism dt/dd/li/option/p use isn't enough on its own).
+  (let [document (html/parse-into-document
+                  "<table><tr><td>A<td>B<tr><td>C</table>")
+        tree (dom/tree document)
+        table (first (:children tree))
+        [tr1 tr2] (:children table)]
+    (is (= 2 (count (:children table))))
+    (is (= :tr (:tag tr1)))
+    (is (= 2 (count (:children tr1))))
+    (is (= :td (:tag (first (:children tr1)))))
+    (is (= ["A"] (:children (first (:children tr1)))))
+    (is (= :td (:tag (second (:children tr1)))))
+    (is (= ["B"] (:children (second (:children tr1)))))
+    (is (= :tr (:tag tr2)))
+    (is (= 1 (count (:children tr2))))
+    (is (= :td (:tag (first (:children tr2)))))
+    (is (= ["C"] (:children (first (:children tr2)))))))
+
+(deftest th-and-td-cross-close-each-other-across-rows
+  ;; Proves the CROSS-tag cell closing (th closed by td and vice versa),
+  ;; not just same-tag, mirroring dd-followed-by-dt-closes-correctly, plus
+  ;; the tr-cascading behavior across three rows in a row (a header row of
+  ;; <th>s followed by two data rows of <td>s, none explicitly closed).
+  (let [document (html/parse-into-document
+                  "<table><tr><th>H1<th>H2<tr><td>A<td>B<tr><td>C<td>D</table>")
+        tree (dom/tree document)
+        table (first (:children tree))
+        [tr1 tr2 tr3] (:children table)]
+    (is (= 3 (count (:children table))))
+    (is (every? #(= :th (:tag %)) (:children tr1)))
+    (is (= ["H1"] (:children (first (:children tr1)))))
+    (is (= ["H2"] (:children (second (:children tr1)))))
+    (is (every? #(= :td (:tag %)) (:children tr2)))
+    (is (= ["A"] (:children (first (:children tr2)))))
+    (is (= ["B"] (:children (second (:children tr2)))))
+    (is (every? #(= :td (:tag %)) (:children tr3)))
+    (is (= ["C"] (:children (first (:children tr3)))))
+    (is (= ["D"] (:children (second (:children tr3)))))))
+
+(deftest table-auto-close-does-not-reach-past-a-nested-table
+  ;; Mirrors `dt-dd-auto-close-does-not-reach-past-a-nested-dl`: a <tr>/<td>
+  ;; that opens inside a NESTED <table> (itself inside an outer, still-open
+  ;; <td>) must not reach past the nested table to cross-close the outer
+  ;; cell/row, even though the cascading pop now walks through more than
+  ;; one level for ordinary same-table auto-closing.
+  (let [document (html/parse-into-document
+                  (str "<table><tr><td>outer<table><tr><td>inner"
+                       "<tr><td>inner2</table>still-outer"
+                       "<tr><td>after</table>"))
+        tree (dom/tree document)
+        outer-table (first (:children tree))
+        [outer-tr1 outer-tr2] (:children outer-table)
+        outer-td (first (:children outer-tr1))
+        [text inner-table trailing-text] (:children outer-td)
+        [inner-tr1 inner-tr2] (:children inner-table)]
+    (is (= 2 (count (:children outer-table)))
+        "the outer table must have exactly 2 rows (the <tr><td>after</td> must not have nested inside the inner table)")
+    (is (= "outer" text))
+    (is (= :table (:tag inner-table)))
+    (is (= 2 (count (:children inner-table))))
+    (is (= ["inner"] (:children (first (:children inner-tr1)))))
+    (is (= ["inner2"] (:children (first (:children inner-tr2)))))
+    (is (= "still-outer" trailing-text)
+        "text after the nested table must still be a sibling inside the OUTER td, not swallowed by the inner table's own auto-close cascade")
+    (is (= ["after"] (:children (first (:children outer-tr2)))))))
+
+(deftest explicit-table-closing-tags-still-work-without-auto-close
+  ;; No-regression check: ordinary, fully-explicit closing tags must keep
+  ;; producing the same correct sibling structure, with or without the new
+  ;; cascading auto-close mechanism ever kicking in.
+  (let [document (html/parse-into-document
+                  "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>")
+        tree (dom/tree document)
+        table (first (:children tree))
+        [tr1 tr2] (:children table)]
+    (is (= 2 (count (:children table))))
+    (is (= 2 (count (:children tr1))))
+    (is (= ["A"] (:children (first (:children tr1)))))
+    (is (= ["B"] (:children (second (:children tr1)))))
+    (is (= 1 (count (:children tr2))))
+    (is (= ["C"] (:children (first (:children tr2)))))))
