@@ -30,20 +30,79 @@
   ;; the end of the declaration's value).
   #"(?i)\s*!important\s*$")
 
+(def ^:private border-style-keywords
+  #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
+
+(defn- border-shorthand-width-token? [tok]
+  (boolean (or (re-matches #"-?\d+" tok) (re-matches #"-?\d+px" tok))))
+
+(defn- expand-border-shorthand
+  "Parses a `border` shorthand value (real CSS's own order-independent
+   grammar, `<line-width> || <line-style> || <color>`) into a map of
+   whichever of `:border-width`/`:border-style`/`:border-color` it
+   actually specifies -- mirrors kotoba-lang/cssom's own identically-
+   scoped `expand-border-shorthand` (same width/color token forms in
+   scope, same functional-notation-color-with-internal-spaces cut) for
+   this repo's OWN, separate initial-HTML-parse inline `style=\"...\"`
+   path, which that repo's fix explicitly did not cover (this repo has
+   no dependency on cssom.core, by design, so the same shorthand logic
+   is duplicated here rather than shared -- consistent with this
+   codebase's existing convention of independently re-implementing a
+   handful of small, identically-scoped helpers across repos rather than
+   introducing a cross-repo dependency for them, e.g. each repo's own
+   `parse-number`/`truthy-attr?`). Returned values are still RAW STRINGS
+   (e.g. `:border-width \"2px\"`), left for `parse-style`'s own later
+   `parse-style-value` coercion step, exactly like every other property
+   this parser handles."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+    (reduce (fn [result tok]
+              (let [lower (str/lower-case tok)]
+                (cond
+                  (and (not (contains? result :border-width))
+                       (border-shorthand-width-token? tok))
+                  (assoc result :border-width tok)
+
+                  (and (not (contains? result :border-style))
+                       (contains? border-style-keywords lower))
+                  (assoc result :border-style tok)
+
+                  (not (contains? result :border-color))
+                  (assoc result :border-color tok)
+
+                  :else result)))
+            {}
+            tokens)))
+
 (defn- parse-style-declarations
   "Splits a raw inline `style=\"...\"` attribute's text into `[property
    raw-value important?]` triples -- `raw-value` has any trailing
    `!important` already stripped, but is NOT yet coerced by
    `parse-style-value`. Shared parsing step behind both `parse-style` and
    `style-importance` below, so the two can never drift out of sync on
-   which declarations they see."
+   which declarations they see.
+
+   A `border` declaration expands into UP TO THREE separate triples (one
+   per longhand it actually specifies -- see `expand-border-shorthand`),
+   all sharing that one declaration's own `important?` flag -- before
+   this, `style=\"border: 2px solid red\"` was stored verbatim as a
+   single, unrecognized `:border` key, which cssom.layout's `border-ops`
+   never reads, so a real, extremely common inline-style border pattern
+   silently painted nothing at all (confirmed via direct REPL
+   reproduction through the real load-html pipeline)."
   [style-text]
   (->> (str/split (or style-text "") #";")
-       (keep (fn [decl]
-               (let [[k v] (map str/trim (str/split decl #":" 2))]
-                 (when (and (seq k) (seq v))
-                   (let [important? (boolean (re-find important-declaration-pattern v))]
-                     [(keyword k) (str/replace v important-declaration-pattern "") important?])))))))
+       (mapcat (fn [decl]
+                 (let [[k v] (map str/trim (str/split decl #":" 2))]
+                   (if (and (seq k) (seq v))
+                     (let [important? (boolean (re-find important-declaration-pattern v))
+                           value (str/replace v important-declaration-pattern "")]
+                       (if (= "border" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand longhand-value important?])
+                              (expand-border-shorthand value))
+                         [[(keyword k) value important?]]))
+                     []))))))
 
 (defn parse-style
   "Parses a raw inline `style=\"...\"` attribute's text into a `{property

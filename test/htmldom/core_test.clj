@@ -69,6 +69,33 @@
         p (dom/node document (first (:children main)))]
     (is (= #{} (get-in p [:attrs :style-inline-important])))))
 
+;; ---- inline style `border` shorthand expansion ----
+
+(deftest inline-style-border-shorthand-expands-into-its-three-longhands
+  ;; The confirmed repro from the bug report: before this, style="border:
+  ;; 2px solid red" was stored verbatim as a single, unrecognized :border
+  ;; key, which cssom.layout's border-ops never reads -- a real, common
+  ;; inline-style border pattern silently painted nothing at all.
+  (is (= {:background "red" :border-width 2 :border-style "solid" :border-color "#00ff00"}
+         (html/parse-style "background: red; border: 2px solid #00ff00"))))
+
+(deftest inline-style-border-shorthand-is-order-independent
+  (is (= {:border-color "red" :border-width 3 :border-style "dashed"}
+         (html/parse-style "border: red 3px dashed"))))
+
+(deftest inline-style-border-shorthand-omits-whichever-longhands-it-does-not-specify
+  (is (= {:border-style "solid" :border-color "red"}
+         (html/parse-style "border: solid red"))
+      "a real, legal border shorthand may omit the width entirely"))
+
+(deftest inline-style-border-shorthand-importance-applies-to-every-expanded-longhand
+  (is (= #{:border-width :border-style :border-color}
+         (html/style-importance "border: 2px solid red !important"))))
+
+(deftest inline-style-border-longhands-declared-separately-are-unaffected
+  (is (= {:border-width 2 :border-color "#00ff00"}
+         (html/parse-style "border-width: 2px; border-color: #00ff00"))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")
