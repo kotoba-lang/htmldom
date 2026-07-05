@@ -263,6 +263,77 @@
         p (dom/node document (first (:children root)))]
     (is (= "Ben & Jerry's" (get-in p [:attrs :title])))))
 
+(deftest void-element-with-trailing-slash-still-self-closes
+  ;; `<br/>` (a real HTML5 void element) must still be treated as
+  ;; self-closing when written with the optional trailing `/>`, exactly like
+  ;; plain `<br>` -- self-closing status comes from void-tag membership, not
+  ;; from the presence of the slash.
+  (let [document (html/parse-into-document "<main><br/>tail</main>")
+        tree (dom/tree document)
+        main (first (:children tree))
+        [br tail] (:children main)]
+    (is (= 2 (count (:children main))))
+    (is (= :br (:tag br)))
+    (is (= [] (:children br)))
+    (is (= "tail" tail))))
+
+(deftest trailing-slash-on-non-void-element-is-not-self-closing
+  ;; Real HTML5 only treats actual void elements as self-closing on a
+  ;; trailing `/>` -- an ordinary element like `<div/>` ignores the stray
+  ;; slash and still needs (and gets matched against) a real closing tag.
+  ;; `foo` must land as `div`'s child, not as a sibling of a bogus
+  ;; already-closed `div`.
+  (let [document (html/parse-into-document "<main><div/>foo</div></main>")
+        tree (dom/tree document)
+        main (first (:children tree))
+        div (first (:children main))]
+    (is (= 1 (count (:children main))))
+    (is (= :div (:tag div)))
+    (is (= ["foo"] (:children div)))))
+
+(deftest self-closing-slash-false-positive-on-script-no-longer-corrupts-parsing
+  ;; Regression test for the severe cascading-corruption bug: a trailing `/`
+  ;; on `<script/>` used to be wrongly treated as self-closing, which
+  ;; defeated the raw-text scanning (`tokenize` only raw-text-scans a
+  ;; non-self-closing raw-text opening tag) and caused the script's own JS
+  ;; body to be re-parsed as bogus markup, corrupting everything after it.
+  ;; `<script>` is not a void element, so it must never self-close, and its
+  ;; body must be captured as raw text up to the real `</script>`.
+  (let [document (html/parse-into-document
+                  "<script/>if (1 < 2) { x(); }</script><p>after</p>")
+        tree (dom/tree document)
+        [script p] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :script (:tag script)))
+    (is (= ["if (1 < 2) { x(); }"] (:children script)))
+    (is (= :p (:tag p)))
+    (is (= ["after"] (:children p)))))
+
+(deftest unquoted-attribute-value-containing-slash-parses-completely
+  ;; A `/` is common in real unquoted `href`/`src` URL values and must not
+  ;; truncate the value: the whole URL is one attribute value, not split
+  ;; into the value plus spurious boolean attributes for the remainder.
+  (let [document (html/parse-into-document
+                  "<a href=http://example.com/path class=btn>link</a>")
+        tree (dom/tree document)
+        a (first (:children tree))]
+    (is (= :a (:tag a)))
+    (is (= "http://example.com/path" (get-in a [:attrs :href])))
+    (is (= "btn" (get-in a [:attrs :class])))
+    (is (= ["link"] (:children a)))))
+
+(deftest quoted-attribute-value-containing-slash-still-parses-correctly
+  ;; No-regression check: a quoted attribute value containing `/` already
+  ;; worked before the unquoted-value fix and must keep working afterward.
+  (let [document (html/parse-into-document
+                  "<a href=\"http://example.com/path\" class=\"btn\">link</a>")
+        tree (dom/tree document)
+        a (first (:children tree))]
+    (is (= :a (:tag a)))
+    (is (= "http://example.com/path" (get-in a [:attrs :href])))
+    (is (= "btn" (get-in a [:attrs :class])))
+    (is (= ["link"] (:children a)))))
+
 (deftest tokenize-mixed-recognized-and-unrecognized-entities
   ;; Exercises htmldom.core/tokenize directly (rather than through
   ;; parse-into-document): an XML entity (&amp;), a numeric decimal

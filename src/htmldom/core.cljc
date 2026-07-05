@@ -107,7 +107,7 @@
 
 (defn- attrs
   [s]
-  (->> (re-seq #"([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>/]+)))?" s)
+  (->> (re-seq #"([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+)))?" s)
        (map (fn [[_ k dq sq bare]]
               [(keyword (str/lower-case k))
                (if-let [v (or dq sq bare)]
@@ -121,11 +121,19 @@
     (let [body (subs raw 1 (dec (count raw)))
           closing? (str/starts-with? body "/")
           body (str/trim (if closing? (subs body 1) body))
-          self? (or (str/ends-with? body "/")
-                    (contains? void-tags (str/lower-case (first (str/split body #"\s+" 2)))))
+          ;; A trailing `/` right before the tag's `>` is always stripped from
+          ;; the tag/attribute text (matching real HTML5, which ignores a
+          ;; stray trailing slash on any start tag) -- but this must happen
+          ;; BEFORE the tag name is extracted, and self-closing status is
+          ;; determined SOLELY by void-tag membership, not by the presence of
+          ;; this slash: real HTML5 only treats actual void elements
+          ;; (`<br/>`, `<img/>`, ...) as self-closing. A trailing `/` on an
+          ;; ordinary element like `<div/>` is ignored -- the element still
+          ;; needs, and will be matched against, a real closing tag later.
           body (str/trim (if (str/ends-with? body "/") (subs body 0 (dec (count body))) body))
           [tag attr-text] (str/split body #"\s+" 2)
-          tag (str/lower-case (or tag ""))]
+          tag (str/lower-case (or tag ""))
+          self? (contains? void-tags tag)]
       (if closing?
         {:type :end :tag tag}
         {:type :start :tag tag :attrs (attrs (or attr-text "")) :self? self?}))
