@@ -553,6 +553,42 @@
       (recur (pop stack))
       stack)))
 
+(defn- maybe-insert-implicit-tbody
+  "Real HTML5's \"in table\" insertion mode inserts an implicit <tbody>
+   before a <tr> start tag when no <tbody>/<thead>/<tfoot> is already open
+   -- i.e. the single most common real-world table shape, rows with no
+   explicit row-group wrapper at all (`<table><tr>...</tr><tr>...</tr>
+   </table>`). Without this, every <tr> nested directly under <table>,
+   which is a genuinely visible, reachable bug, not just a DOM-purity
+   nicety: a `table > tr` CSS child-combinator selector wrongly MATCHED
+   (confirmed by direct reproduction), when real HTML5/CSS never lets it
+   -- a real tr's parent is always a row group -- while the equally common
+   `tbody > tr` selector wrongly never matched a bare table's own rows.
+
+   Only triggers when the current stack top is `:table` itself (no
+   row-group open yet); a second, third, etc. <tr> correctly reuses the
+   SAME already-open implicit <tbody> instead of inserting another one,
+   since `auto-close-stack` (called before this, on `:tr`'s own trigger
+   set `#{:tr}`) pops the previous <tr> (and any still-open <td>/<th>)
+   but deliberately does NOT pop the synthesized <tbody> itself -- `:tbody`
+   is not a key in `auto-close-tags` -- so it stays as the new stack top.
+
+   Deliberately scoped to `:tr` only, mirroring the same \"most common
+   case, not full spec coverage\" convention as `auto-close-tags`: a bare
+   <td>/<th> directly under <table> with no <tr> at all (itself already
+   an unusual, arguably-malformed shape) is NOT covered here -- it still
+   nests directly under whatever the current stack top is, same as before
+   this fix. Explicit <thead>/<tbody>/<tfoot> tags are unaffected either
+   way -- this only ever fires when none of the three appear in the
+   source at all."
+  [document stack tag-kw]
+  (if (and (= tag-kw :tr)
+           (= :table (get-in document [:nodes (peek stack) :tag])))
+    (let [[tbody-id document] (dom/create-element document :tbody)
+          document (dom/append-child document (peek stack) tbody-id)]
+      [document (conj stack tbody-id)])
+    [document stack]))
+
 (defn- preserve-whitespace-context?
   "Whether the CURRENT stack means whitespace in an about-to-be-created
    text node must be preserved verbatim rather than collapsed to single
@@ -596,6 +632,7 @@
                 ;; when the newly-exposed top ALSO matches (e.g. a new <tr>
                 ;; closing an open <td> then also the enclosing <tr>).
                 stack (auto-close-stack document stack tag-kw)
+                [document stack] (maybe-insert-implicit-tbody document stack tag-kw)
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)

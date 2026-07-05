@@ -581,8 +581,12 @@
                   "<table><tr><td>A<td>B<tr><td>C</table>")
         tree (dom/tree document)
         table (first (:children tree))
-        [tr1 tr2] (:children table)]
-    (is (= 2 (count (:children table))))
+        tbody (first (:children table))
+        [tr1 tr2] (:children tbody)]
+    (is (= 1 (count (:children table)))
+        "bare rows get wrapped in a single implicit tbody")
+    (is (= :tbody (:tag tbody)))
+    (is (= 2 (count (:children tbody))))
     (is (= :tr (:tag tr1)))
     (is (= 2 (count (:children tr1))))
     (is (= :td (:tag (first (:children tr1)))))
@@ -603,8 +607,11 @@
                   "<table><tr><th>H1<th>H2<tr><td>A<td>B<tr><td>C<td>D</table>")
         tree (dom/tree document)
         table (first (:children tree))
-        [tr1 tr2 tr3] (:children table)]
-    (is (= 3 (count (:children table))))
+        tbody (first (:children table))
+        [tr1 tr2 tr3] (:children tbody)]
+    (is (= 1 (count (:children table)))
+        "bare rows get wrapped in a single implicit tbody")
+    (is (= 3 (count (:children tbody))))
     (is (every? #(= :th (:tag %)) (:children tr1)))
     (is (= ["H1"] (:children (first (:children tr1)))))
     (is (= ["H2"] (:children (second (:children tr1)))))
@@ -627,15 +634,21 @@
                        "<tr><td>after</table>"))
         tree (dom/tree document)
         outer-table (first (:children tree))
-        [outer-tr1 outer-tr2] (:children outer-table)
+        outer-tbody (first (:children outer-table))
+        [outer-tr1 outer-tr2] (:children outer-tbody)
         outer-td (first (:children outer-tr1))
         [text inner-table trailing-text] (:children outer-td)
-        [inner-tr1 inner-tr2] (:children inner-table)]
-    (is (= 2 (count (:children outer-table)))
-        "the outer table must have exactly 2 rows (the <tr><td>after</td> must not have nested inside the inner table)")
+        inner-tbody (first (:children inner-table))
+        [inner-tr1 inner-tr2] (:children inner-tbody)]
+    (is (= 1 (count (:children outer-table)))
+        "the outer table wraps its bare rows in a single implicit tbody, independent of the nested table's own")
+    (is (= 2 (count (:children outer-tbody)))
+        "the outer table's tbody must have exactly 2 rows (the <tr><td>after</td> must not have nested inside the inner table)")
     (is (= "outer" text))
     (is (= :table (:tag inner-table)))
-    (is (= 2 (count (:children inner-table))))
+    (is (= 1 (count (:children inner-table)))
+        "the nested table gets its OWN independent implicit tbody, not reusing the outer table's")
+    (is (= 2 (count (:children inner-tbody))))
     (is (= ["inner"] (:children (first (:children inner-tr1)))))
     (is (= ["inner2"] (:children (first (:children inner-tr2)))))
     (is (= "still-outer" trailing-text)
@@ -650,13 +663,73 @@
                   "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td></tr></table>")
         tree (dom/tree document)
         table (first (:children tree))
-        [tr1 tr2] (:children table)]
-    (is (= 2 (count (:children table))))
+        tbody (first (:children table))
+        [tr1 tr2] (:children tbody)]
+    (is (= 1 (count (:children table)))
+        "even fully-explicit rows get wrapped in a single implicit tbody, same as bare rows")
+    (is (= 2 (count (:children tbody))))
     (is (= 2 (count (:children tr1))))
     (is (= ["A"] (:children (first (:children tr1)))))
     (is (= ["B"] (:children (second (:children tr1)))))
     (is (= 1 (count (:children tr2))))
     (is (= ["C"] (:children (first (:children tr2)))))))
+
+(deftest bare-table-rows-get-wrapped-in-a-single-implicit-tbody
+  ;; The confirmed repro from the bug report: a <table> with rows but no
+  ;; explicit <thead>/<tbody>/<tfoot> at all -- the single most common
+  ;; real-world table shape -- nested every <tr> DIRECTLY under <table>,
+  ;; with no row-group wrapper. This is a genuinely visible, reachable bug,
+  ;; not just a DOM-purity nicety: confirmed separately that it makes a
+  ;; `table > tr` CSS child-combinator selector wrongly MATCH (real
+  ;; HTML5/CSS never lets it -- a real tr's parent is always a row group)
+  ;; while the equally common `tbody > tr` selector wrongly never matches.
+  (let [document (html/parse-into-document
+                  "<table><tr><td>A</td></tr><tr><td>B</td></tr></table>")
+        tree (dom/tree document)
+        table (first (:children tree))
+        tbody (first (:children table))]
+    (is (= 1 (count (:children table))) "exactly one implicit tbody, not one per row")
+    (is (= :tbody (:tag tbody)))
+    (is (= 2 (count (:children tbody))) "both rows land inside the SAME implicit tbody")
+    (is (every? #(= :tr (:tag %)) (:children tbody)))))
+
+(deftest explicit-thead-tbody-tfoot-are-unaffected-by-implicit-tbody
+  ;; No-regression check: a table that already spells out its own row
+  ;; groups explicitly must not get an extra, redundant implicit tbody
+  ;; inserted anywhere -- the implicit-insertion rule only ever fires when
+  ;; the current stack top is bare <table> itself.
+  (let [document (html/parse-into-document
+                  (str "<table><thead><tr><th>H</th></tr></thead>"
+                       "<tbody><tr><td>A</td></tr></tbody>"
+                       "<tfoot><tr><td>F</td></tr></tfoot></table>"))
+        tree (dom/tree document)
+        table (first (:children tree))
+        [thead tbody tfoot] (:children table)]
+    (is (= 3 (count (:children table))) "no extra row group inserted")
+    (is (= [:thead :tbody :tfoot] (map :tag (:children table))))
+    (is (= ["H"] (:children (first (:children (first (:children thead)))))))
+    (is (= ["A"] (:children (first (:children (first (:children tbody)))))))
+    (is (= ["F"] (:children (first (:children (first (:children tfoot)))))))))
+
+(deftest nested-table-gets-its-own-independent-implicit-tbody
+  ;; A <table> nested inside a bare row's cell must get its OWN implicit
+  ;; tbody, entirely independent of the outer table's -- the stack-top
+  ;; check that triggers insertion only ever sees the INNERMOST open
+  ;; <table>, never reaching past it to the outer one.
+  (let [document (html/parse-into-document
+                  "<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>")
+        tree (dom/tree document)
+        outer-table (first (:children tree))
+        outer-tbody (first (:children outer-table))
+        outer-td (first (:children (first (:children outer-tbody))))
+        inner-table (first (:children outer-td))
+        inner-tbody (first (:children inner-table))]
+    (is (= 1 (count (:children outer-table))))
+    (is (= :table (:tag inner-table)))
+    (is (= 1 (count (:children inner-table)))
+        "the nested table gets its own implicit tbody, not the outer one's")
+    (is (= :tbody (:tag inner-tbody)))
+    (is (= ["inner"] (:children (first (:children (first (:children inner-tbody)))))))))
 
 (deftest pre-content-preserves-internal-whitespace-and-newlines
   ;; The confirmed repro from the bug report: real <pre> elements must
