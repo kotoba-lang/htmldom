@@ -476,3 +476,97 @@
     (is (= 2 (count (:children div))))
     (is (= :p (:tag p1))) (is (= ["one"] (:children p1)))
     (is (= :p (:tag p2))) (is (= ["two"] (:children p2)))))
+
+;; <dt>/<dd> CROSS-closing auto-closing (see `auto-close-tags` in
+;; htmldom.core). Unlike <li>/<option>/<p> above, which only close on
+;; ANOTHER INSTANCE OF THE SAME TAG, <dt>/<dd> close each other: a new <dt>
+;; implicitly closes a currently open <dt> OR <dd>, and a new <dd> implicitly
+;; closes a currently open <dd> OR <dt>. Before this fix, definition lists
+;; written without explicit closing tags -- a common, real-world pattern --
+;; silently produced a wrongly-nested tree: `<dl>` ended up with only ONE
+;; child (the first <dt>), with every subsequent <dd>/<dt> nested deeper and
+;; deeper inside it instead of landing as flat siblings.
+
+(deftest dt-dd-alternating-without-closing-tags-produces-flat-siblings
+  ;; The confirmed repro from the bug report: <dt>/<dd> alternating with no
+  ;; explicit closing tags must land as FOUR flat SIBLINGS under <dl>, not
+  ;; nested four deep.
+  (let [document (html/parse-into-document
+                  "<dl><dt>Term 1<dd>Def 1<dt>Term 2<dd>Def 2</dl>")
+        tree (dom/tree document)
+        dl (first (:children tree))
+        [dt1 dd1 dt2 dd2] (:children dl)]
+    (is (= 1 (count (:children tree))))
+    (is (= :dl (:tag dl)))
+    (is (= 4 (count (:children dl))))
+    (is (= :dt (:tag dt1))) (is (= ["Term 1"] (:children dt1)))
+    (is (= :dd (:tag dd1))) (is (= ["Def 1"] (:children dd1)))
+    (is (= :dt (:tag dt2))) (is (= ["Term 2"] (:children dt2)))
+    (is (= :dd (:tag dd2))) (is (= ["Def 2"] (:children dd2)))))
+
+(deftest dt-followed-by-dt-closes-correctly
+  ;; Same-tag case: a new <dt> closes a currently open <dt>.
+  (let [document (html/parse-into-document "<dl><dt>one<dt>two</dl>")
+        tree (dom/tree document)
+        dl (first (:children tree))
+        [dt1 dt2] (:children dl)]
+    (is (= 2 (count (:children dl))))
+    (is (= :dt (:tag dt1))) (is (= ["one"] (:children dt1)))
+    (is (= :dt (:tag dt2))) (is (= ["two"] (:children dt2)))))
+
+(deftest dd-followed-by-dt-closes-correctly
+  ;; Proves the CROSS-tag closing, not just same-tag: a <dd> is implicitly
+  ;; closed by a following <dt>, even though they're different tags.
+  (let [document (html/parse-into-document "<dl><dd>one<dt>two</dl>")
+        tree (dom/tree document)
+        dl (first (:children tree))
+        [dd1 dt1] (:children dl)]
+    (is (= 2 (count (:children dl))))
+    (is (= :dd (:tag dd1))) (is (= ["one"] (:children dd1)))
+    (is (= :dt (:tag dt1))) (is (= ["two"] (:children dt1)))))
+
+(deftest dd-followed-by-dd-closes-correctly
+  ;; Same-tag case: a new <dd> closes a currently open <dd>.
+  (let [document (html/parse-into-document "<dl><dd>one<dd>two</dl>")
+        tree (dom/tree document)
+        dl (first (:children tree))
+        [dd1 dd2] (:children dl)]
+    (is (= 2 (count (:children dl))))
+    (is (= :dd (:tag dd1))) (is (= ["one"] (:children dd1)))
+    (is (= :dd (:tag dd2))) (is (= ["two"] (:children dd2)))))
+
+(deftest dt-dd-auto-close-does-not-reach-past-a-nested-dl
+  ;; Mirrors `li-auto-close-does-not-reach-past-a-nested-list`: the
+  ;; auto-close check only looks at the TOP of the stack (the innermost open
+  ;; element), never scanning down past it. A new <dt> that opens inside a
+  ;; nested <dl> which itself sits inside a still-open outer <dd> must NOT
+  ;; reach past the nested <dl> to cross-close the outer <dd> it doesn't
+  ;; actually follow -- the outer <dd> should still contain the whole nested
+  ;; definition list.
+  (let [document (html/parse-into-document
+                  "<dl><dd>outer<dl><dt>inner-one<dt>inner-two</dl></dl>")
+        tree (dom/tree document)
+        outer-dl (first (:children tree))
+        outer-dd (first (:children outer-dl))
+        [text inner-dl] (:children outer-dd)
+        [inner-dt1 inner-dt2] (:children inner-dl)]
+    (is (= 1 (count (:children outer-dl))))
+    (is (= :dd (:tag outer-dd)))
+    (is (= "outer" text))
+    (is (= :dl (:tag inner-dl)))
+    (is (= 2 (count (:children inner-dl))))
+    (is (= :dt (:tag inner-dt1))) (is (= ["inner-one"] (:children inner-dt1)))
+    (is (= :dt (:tag inner-dt2))) (is (= ["inner-two"] (:children inner-dt2)))))
+
+(deftest explicit-dt-dd-closing-tags-still-work-without-auto-close
+  ;; No-regression check: ordinary, fully-explicit closing tags must keep
+  ;; producing the same correct sibling structure, with or without the new
+  ;; cross-closing auto-close mechanism ever kicking in.
+  (let [document (html/parse-into-document
+                  "<dl><dt>term</dt><dd>def</dd></dl>")
+        tree (dom/tree document)
+        dl (first (:children tree))
+        [dt dd] (:children dl)]
+    (is (= 2 (count (:children dl))))
+    (is (= :dt (:tag dt))) (is (= ["term"] (:children dt)))
+    (is (= :dd (:tag dd))) (is (= ["def"] (:children dd)))))

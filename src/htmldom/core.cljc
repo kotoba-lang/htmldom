@@ -447,6 +447,22 @@
              followed by an unrelated block element still (wrongly, but
              boundedly, and no worse than before this table existed) nests
              under this parser.
+     :dt/:dd definition-list items CROSS-close each other, unlike the
+             same-tag-only entries above. Real HTML5: a <dt>'s end tag \"may
+             be omitted if the dt element is immediately followed by another
+             dt element or a dd element\"; a <dd>'s end tag \"may be omitted
+             if the dd element is immediately followed by another dd element
+             or a dt element, or if there is no more content in its parent
+             element\". So a new <dt> closes a currently open <dt> OR <dd>,
+             and a new <dd> closes a currently open <dd> OR <dt> -- hence
+             both values below are `#{:dt :dd}`, not a single-tag set. As
+             with <li>/<option>, the \"no more content in parent\" half of
+             the <dd> rule needs no extra code here: it already falls out of
+             the `:end` case closing every still-open descendant above a
+             matched ancestor tag. This is the single most common real-world
+             definition-list pattern (`<dl><dt>term<dd>def<dt>term<dd>def</dl>`,
+             no explicit </dt>/</dd>); nothing broader (e.g. <dt>/<dd> mixed
+             with unrelated flow content) is in scope.
 
    Deliberately NOT scanned up the stack: only the top of the stack (the
    innermost currently-open element) is ever checked, matching the
@@ -456,10 +472,17 @@
    normal nested list) must NOT reach past the nested <ul> to close the
    outer <li>. It doesn't: the nested <ul> occupies the top of the stack at
    that point, not the outer <li>, so the outer <li> is never even
-   examined."
+   examined. Same reasoning applies to the cross-closing <dt>/<dd> pair: a
+   <dt> opening inside a nested <dl> (itself inside an outer, still-open
+   <dd> or <dt>) must NOT reach past the nested <dl> to cross-close the
+   outer <dt>/<dd> it doesn't actually follow. It doesn't, for the same
+   reason -- the nested <dl> occupies the top of the stack, not the outer
+   <dt>/<dd>."
   {:li #{:li}
    :option #{:option}
-   :p #{:p}})
+   :p #{:p}
+   :dt #{:dt :dd}
+   :dd #{:dt :dd}})
 
 (defn parse-into-document
   [html]
