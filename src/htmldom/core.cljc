@@ -406,6 +406,61 @@
         i
         (recur (dec i))))))
 
+(def ^:private auto-close-tags
+  "HTML5 elements whose end tag is allowed to be OMITTED because the spec
+   defines an implicit close: when a new element starts while a matching
+   element still sits at the TOP of the stack of open elements (i.e. it is
+   the innermost, most-recently-opened element -- nothing else has opened
+   inside it since), the browser implicitly closes that open element first,
+   exactly as if a real closing tag for it had appeared, instead of nesting
+   the new element inside it. Keys are the tag that may be implicitly
+   closed; values are the set of new START tags that trigger the close.
+
+   This is a deliberately SCOPED subset of HTML5's much larger \"omitting
+   tags\" table -- only the highest-frequency, most tightly-bounded cases,
+   not full spec coverage (see the `:not()`/`:is()`/`:where()`/`:has()`
+   scoped-limitation convention in the sibling cssom repo for the shape of
+   this kind of documented, honest cut):
+
+     :li     a new <li> closes a currently open <li>. Real HTML5's rule is
+             \"may be omitted if the li element is immediately followed by
+             another li element, or if there is no more content in its
+             parent element\" -- the \"no more content in parent\" half
+             needs no extra code here: it already falls out of this
+             parser's general behavior of closing every still-open element
+             above a matched tag when that ancestor's own end tag arrives
+             (see the `:end` case below, and `find-top-match-index`). Only
+             the \"immediately followed by another li\" half needs this
+             table.
+     :option a new <option> closes a currently open <option>. Same shape as
+             <li>: the spec also lets end-of-parent (or a following
+             <optgroup>) close an <option>, which end-of-parent is likewise
+             covered for free by the `:end` case; a following <optgroup> is
+             out of scope.
+     :p      a new <p> closes a currently open <p>. Real HTML5's actual <p>
+             rule is much broader (a specific list of ~30 block-level
+             elements -- <div>, <ul>, <h1>, etc. -- also implicitly close an
+             open <p>, not just another <p>). That fuller rule is
+             deliberately OUT OF SCOPE here: this engine only auto-closes an
+             open <p> when another <p> starts, which is the single most
+             common real-world case (`<p>one<p>two`). A <p> immediately
+             followed by an unrelated block element still (wrongly, but
+             boundedly, and no worse than before this table existed) nests
+             under this parser.
+
+   Deliberately NOT scanned up the stack: only the top of the stack (the
+   innermost currently-open element) is ever checked, matching the
+   \"immediately followed by\"/\"most recent\" framing above. This matters
+   for correctness, not just simplicity -- e.g. a new <li> that opens inside
+   a nested <ul> which itself sits inside an outer, still-open <li> (a
+   normal nested list) must NOT reach past the nested <ul> to close the
+   outer <li>. It doesn't: the nested <ul> occupies the top of the stack at
+   that point, not the outer <li>, so the outer <li> is never even
+   examined."
+  {:li #{:li}
+   :option #{:option}
+   :p #{:p}})
+
 (defn parse-into-document
   [html]
   (let [[root-id document] (dom/create-element dom/empty-document :document)
@@ -420,7 +475,19 @@
             (recur (dom/append-child document (peek stack) id) stack (next tokens)))
 
           :start
-          (let [[id document] (dom/create-element document tag)
+          (let [tag-kw (keyword tag)
+                ;; Optional-end-tag auto-closing (see `auto-close-tags`): if
+                ;; the innermost currently-open element (top of the stack)
+                ;; is one this new start tag implicitly closes -- e.g. a new
+                ;; <li> while an <li> is already open -- pop it first, as if
+                ;; a real closing tag for it had just appeared. Never pops
+                ;; the root (index 0).
+                top-tag (get-in document [:nodes (peek stack) :tag])
+                stack (if (and (> (count stack) 1)
+                               (contains? (auto-close-tags top-tag) tag-kw))
+                        (pop stack)
+                        stack)
+                [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)
                              (dom/append-child (peek stack) id))]
