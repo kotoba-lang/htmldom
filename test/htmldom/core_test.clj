@@ -344,3 +344,135 @@
         text-tok (second tokens)]
     (is (= :text (:type text-tok)))
     (is (= "Ben & Jerry's \u00A9 caf&eacute;" (:text text-tok)))))
+
+;; Optional-end-tag auto-closing (see `auto-close-tags` in htmldom.core).
+;; Real HTML5 implicitly closes certain still-open elements when a new
+;; matching (or, for <p>, identical) element starts, rather than nesting the
+;; new one inside the still-open one. This repo previously did not
+;; implement that at all, which silently produced wrongly-NESTED trees for
+;; extremely common markup like `<li>`-only lists and `<option>`-only
+;; selects -- and for `<option>`, the wrong nesting went on to corrupt a
+;; computed value (`initialize-select-state`'s default `:value` for the
+;; `<select>`, via `text-content` walking all descendants of the first
+;; option instead of just its own text).
+
+(deftest li-auto-closing-produces-siblings-not-nesting
+  ;; The confirmed repro from the bug report: three <li>s with no explicit
+  ;; closing tags must land as three SIBLINGS under <ul>, not nested three
+  ;; deep.
+  (let [document (html/parse-into-document "<ul><li>one<li>two<li>three</ul>")
+        tree (dom/tree document)
+        ul (first (:children tree))
+        [li1 li2 li3] (:children ul)]
+    (is (= 1 (count (:children tree))))
+    (is (= :ul (:tag ul)))
+    (is (= 3 (count (:children ul))))
+    (is (= :li (:tag li1))) (is (= ["one"] (:children li1)))
+    (is (= :li (:tag li2))) (is (= ["two"] (:children li2)))
+    (is (= :li (:tag li3))) (is (= ["three"] (:children li3)))))
+
+(deftest li-auto-close-does-not-reach-past-a-nested-list
+  ;; The auto-close check only looks at the TOP of the stack (the innermost
+  ;; open element), never scanning down past it. A new <li> that opens
+  ;; inside a nested <ul> which itself sits inside a still-open outer <li>
+  ;; must NOT reach past the nested <ul> to close the outer <li> -- the
+  ;; outer <li> should still contain the whole nested list.
+  (let [document (html/parse-into-document
+                  "<ul><li>outer<ul><li>inner-one<li>inner-two</ul></ul>")
+        tree (dom/tree document)
+        outer-ul (first (:children tree))
+        outer-li (first (:children outer-ul))
+        [text inner-ul] (:children outer-li)
+        [inner-li1 inner-li2] (:children inner-ul)]
+    (is (= 1 (count (:children outer-ul))))
+    (is (= :li (:tag outer-li)))
+    (is (= "outer" text))
+    (is (= :ul (:tag inner-ul)))
+    (is (= 2 (count (:children inner-ul))))
+    (is (= :li (:tag inner-li1))) (is (= ["inner-one"] (:children inner-li1)))
+    (is (= :li (:tag inner-li2))) (is (= ["inner-two"] (:children inner-li2)))))
+
+(deftest explicit-li-closing-tags-still-work-without-auto-close
+  ;; No-regression check: ordinary, fully-explicit closing tags must keep
+  ;; producing the same correct sibling structure, with or without the new
+  ;; auto-close mechanism ever kicking in.
+  (let [document (html/parse-into-document "<ul><li>one</li><li>two</li></ul>")
+        tree (dom/tree document)
+        ul (first (:children tree))
+        [li1 li2] (:children ul)]
+    (is (= 2 (count (:children ul))))
+    (is (= :li (:tag li1))) (is (= ["one"] (:children li1)))
+    (is (= :li (:tag li2))) (is (= ["two"] (:children li2)))))
+
+(deftest option-auto-closing-produces-siblings-not-nesting
+  ;; The other confirmed repro: a second <option> with no explicit closing
+  ;; tag for the first must land as a SIBLING, not nested inside the first.
+  (let [document (html/parse-into-document
+                  "<select><option>A<option value=\"b\">B</select>")
+        tree (dom/tree document)
+        select (first (:children tree))
+        [opt1 opt2] (:children select)]
+    (is (= 2 (count (:children select))))
+    (is (= :option (:tag opt1))) (is (= ["A"] (:children opt1)))
+    (is (= :option (:tag opt2))) (is (= ["B"] (:children opt2)))
+    (is (= "b" (get-in opt2 [:attrs :value])))))
+
+(deftest option-auto-closing-fixes-select-default-value-computation
+  ;; Regression check for the corrupted-computed-value consequence called
+  ;; out in the bug report: before this fix, option "b" ended up nested
+  ;; inside option "A", so `initialize-select-state`'s `text-content` walk
+  ;; of the first option's own text picked up BOTH options' text
+  ;; concatenated ("AB") when computing the <select>'s default :value.
+  ;; With option "A" and option "b" now correct siblings, the <select>'s
+  ;; default :value must be just "A" (the first option's own text, since
+  ;; neither option has an explicit `selected` attribute and option "A" has
+  ;; no `value` attribute of its own).
+  (let [document (html/parse-into-document
+                  "<select><option>A<option value=\"b\">B</select>")
+        root (dom/node document (:root document))
+        select (dom/node document (first (:children root)))]
+    (is (= "A" (get-in select [:attrs :value])))))
+
+(deftest p-auto-closing-closes-open-p-when-new-p-starts
+  ;; The scoped <p> rule this parser implements: a new <p> closes a
+  ;; currently open <p>, so `<p>one<p>two` produces two SIBLING <p>s, not
+  ;; "two" nested inside "one". (Real HTML5's fuller <p> rule -- where many
+  ;; other block-level start tags, e.g. <div>/<ul>, also close an open <p>
+  ;; -- is deliberately out of scope; see `auto-close-tags`'s docstring in
+  ;; htmldom.core and the next test for that documented limitation.)
+  (let [document (html/parse-into-document "<div><p>one<p>two</div>")
+        tree (dom/tree document)
+        div (first (:children tree))
+        [p1 p2] (:children div)]
+    (is (= 2 (count (:children div))))
+    (is (= :p (:tag p1))) (is (= ["one"] (:children p1)))
+    (is (= :p (:tag p2))) (is (= ["two"] (:children p2)))))
+
+(deftest p-auto-closing-scope-limitation-a-following-block-element-still-nests
+  ;; Documented limitation (see `auto-close-tags`'s docstring in
+  ;; htmldom.core): this engine only auto-closes an open <p> when another
+  ;; <p> starts, not the full real-HTML5 list of block-level elements that
+  ;; also close an open <p>. A <div> immediately following an unclosed <p>
+  ;; still (wrongly, but boundedly, and no worse than before this feature
+  ;; existed) nests under this parser rather than becoming <p>'s sibling.
+  ;; This test pins down the deliberate cut so a future change to it is a
+  ;; conscious decision, not an accidental regression.
+  (let [document (html/parse-into-document "<p>one<div>two</div>")
+        tree (dom/tree document)
+        p (first (:children tree))
+        [text div] (:children p)]
+    (is (= 1 (count (:children tree))))
+    (is (= :p (:tag p)))
+    (is (= "one" text))
+    (is (= :div (:tag div)))
+    (is (= ["two"] (:children div)))))
+
+(deftest explicit-p-closing-tag-still-works-without-auto-close
+  ;; No-regression check for <p>, mirroring the <li> one above.
+  (let [document (html/parse-into-document "<div><p>one</p><p>two</p></div>")
+        tree (dom/tree document)
+        div (first (:children tree))
+        [p1 p2] (:children div)]
+    (is (= 2 (count (:children div))))
+    (is (= :p (:tag p1))) (is (= ["one"] (:children p1)))
+    (is (= :p (:tag p2))) (is (= ["two"] (:children p2)))))
