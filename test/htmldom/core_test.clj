@@ -29,6 +29,46 @@
     (is (= "red" (get-in p [:attrs :style/color])))
     (is (= 4 (get-in p [:attrs :style/padding])))))
 
+(deftest inline-style-important-is-stripped-from-the-value-not-left-corrupting-it
+  ;; The confirmed repro from the bug report: before this fix, a trailing
+  ;; `!important` was never stripped from an inline declaration's value at
+  ;; all -- the literal suffix stayed IN the value (`"red !important"`),
+  ;; which no downstream color/length parser recognizes as `"red"`. This is
+  ;; not merely "importance ignored", it's a genuinely corrupted value that
+  ;; silently fails to parse and falls back to that property's own
+  ;; unstyled/transparent default -- a real, visible rendering bug.
+  (is (= {:color "red" :padding 4}
+         (html/parse-style "color: red !important; padding: 4px")))
+  (is (= {:color "red"} (html/parse-style "color: red!important"))
+      "no space before !important must still strip cleanly")
+  (is (= {:color "red"} (html/parse-style "color: red !IMPORTANT"))
+      "!important is case-insensitive"))
+
+(deftest style-importance-reports-which-properties-were-marked-important
+  (is (= #{:color} (html/style-importance "color: red !important; padding: 4px")))
+  (is (= #{:color :padding} (html/style-importance "color: red !important; padding: 4px !important")))
+  (is (= #{} (html/style-importance "color: red; padding: 4px"))
+      "no !important anywhere -> empty set, not nil"))
+
+(deftest parsed-document-carries-both-corrected-value-and-importance-attrs
+  (let [document (html/parse-into-document
+                  "<main><p style=\"color: red !important; padding: 4px\">Hi</p></main>")
+        root (dom/node document (:root document))
+        main (dom/node document (first (:children root)))
+        p (dom/node document (first (:children main)))]
+    (is (= {:color "red" :padding 4} (get-in p [:attrs :style-inline]))
+        "the real value, not the corrupted \"red !important\" string")
+    (is (= #{:color} (get-in p [:attrs :style-inline-important])))
+    (is (= "red" (get-in p [:attrs :style/color]))
+        "the resolved :style/* attr real paint code reads must also be uncorrupted")))
+
+(deftest inline-style-without-important-gets-an-empty-importance-set-not-a-missing-attr
+  (let [document (html/parse-into-document "<main><p style=\"color: red\">Hi</p></main>")
+        root (dom/node document (:root document))
+        main (dom/node document (first (:children root)))
+        p (dom/node document (first (:children main)))]
+    (is (= #{} (get-in p [:attrs :style-inline-important])))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")

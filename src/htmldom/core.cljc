@@ -24,14 +24,61 @@
                                    :cljs (js/parseInt v 10))
       :else v)))
 
-(defn parse-style
+(def ^:private important-declaration-pattern
+  ;; Mirrors cssom.core's own `!important` regex convention exactly (same
+  ;; case-insensitivity, same optional-leading-whitespace, same anchor at
+  ;; the end of the declaration's value).
+  #"(?i)\s*!important\s*$")
+
+(defn- parse-style-declarations
+  "Splits a raw inline `style=\"...\"` attribute's text into `[property
+   raw-value important?]` triples -- `raw-value` has any trailing
+   `!important` already stripped, but is NOT yet coerced by
+   `parse-style-value`. Shared parsing step behind both `parse-style` and
+   `style-importance` below, so the two can never drift out of sync on
+   which declarations they see."
   [style-text]
   (->> (str/split (or style-text "") #";")
        (keep (fn [decl]
                (let [[k v] (map str/trim (str/split decl #":" 2))]
                  (when (and (seq k) (seq v))
-                   [(keyword k) (parse-style-value v)]))))
-       (into {})))
+                   (let [important? (boolean (re-find important-declaration-pattern v))]
+                     [(keyword k) (str/replace v important-declaration-pattern "") important?])))))))
+
+(defn parse-style
+  "Parses a raw inline `style=\"...\"` attribute's text into a `{property
+   value}` map (`value` coerced by `parse-style-value`).
+
+   A trailing `!important` on a declaration (real, common CSS -- e.g.
+   `style=\"color: red !important\"`, routinely used to override a
+   stubborn rule-based style) is stripped from the value before coercion.
+   Before this, `!important` was never stripped here at all: the literal
+   suffix stayed IN the value (e.g. `:color \"red !important\"`), which is
+   not merely \"importance ignored\" but a genuinely broken property value
+   -- downstream color/length parsers don't recognize `\"red !important\"`
+   as `\"red\"` at all, so an `!important`-marked inline color/size
+   silently failed to parse and fell back to that property's own
+   unstyled/transparent default instead of ever showing the intended
+   value. See `style-importance` for the separate, additive companion
+   that reports WHICH properties were marked `!important` (needed so
+   `cssom.core` can still rank them correctly against `!important`
+   rule-based declarations -- real CSS's importance/cascade-origin step,
+   not just \"don't corrupt the value\")."
+  [style-text]
+  (into {} (map (fn [[k v _]] [k (parse-style-value v)])) (parse-style-declarations style-text)))
+
+(defn style-importance
+  "The set of property keywords whose declaration in `style-text` (a raw
+   inline `style=\"...\"` attribute's text) ended in `!important`.
+
+   Deliberately a SEPARATE function/attr (`:style-inline-important`, see
+   `apply-attrs`) rather than changing `parse-style`'s own `{property
+   value}` return shape to also carry importance inline -- `:style-inline`
+   has real consumers elsewhere (kotoba-lang/browser's `dom_bridge.cljc`,
+   and several of that repo's own tests) that expect a plain value map and
+   must not be disturbed by this fix."
+  [style-text]
+  (into #{} (keep (fn [[k _ important?]] (when important? k))) (parse-style-declarations style-text)))
 
 (def ^:private named-char-refs
   "A small, pragmatic subset of HTML5 named character references: the five
@@ -275,6 +322,7 @@
        (let [style (parse-style v)]
          (-> document
              (dom/set-attribute id :style-inline style)
+             (dom/set-attribute id :style-inline-important (style-importance v))
              (dom/set-style id style)))
        (dom/set-attribute document id k v)))
    document
