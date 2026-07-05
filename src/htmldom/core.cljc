@@ -137,9 +137,19 @@
       (if closing?
         {:type :end :tag tag}
         {:type :start :tag tag :attrs (attrs (or attr-text "")) :self? self?}))
-    (let [text (str/replace raw #"\s+" " ")]
-      (when-not (str/blank? text)
-        {:type :text :text (decode-entities text)}))))
+    ;; Whitespace COLLAPSING is deliberately NOT done here anymore -- it
+    ;; depends on whether a <pre> ancestor is currently open, which this
+    ;; stateless, stack-free tokenizing pass has no way to know (unlike
+    ;; parse-into-document, which already tracks the open-element stack for
+    ;; auto-closing). This fn keeps the ORIGINAL, uncollapsed text in the
+    ;; token; parse-into-document's own `:text` case now does the
+    ;; collapsing, conditionally, once it can actually check the stack. The
+    ;; blank-check stays here unconditionally, though: a run of ONLY
+    ;; whitespace between tags is dropped the same way regardless of <pre>
+    ;; context either way (collapsing an all-whitespace string never changes
+    ;; whether it's blank), so this filtering doesn't need to move.
+    (when-not (str/blank? raw)
+      {:type :text :text (decode-entities raw)})))
 
 (def ^:private raw-text-tags
   "Elements whose content real HTML parsers scan as literal raw text rather
@@ -543,6 +553,22 @@
       (recur (pop stack))
       stack)))
 
+(defn- preserve-whitespace-context?
+  "Whether the CURRENT stack means whitespace in an about-to-be-created
+   text node must be preserved verbatim rather than collapsed to single
+   spaces: either (a) the innermost open element is a raw-text/RCDATA tag
+   (`<script>`/`<style>`/`<title>`/`<textarea>`) -- their own text content
+   always arrives here as a single, tag-less `:text` token via
+   `tokenize`'s separate raw-text-scanning branch (see `raw-text-tags`),
+   and was ALREADY verbatim before whitespace collapsing moved into this
+   fn, so it must stay that way -- or (b) a real `<pre>` is anywhere in
+   the stack (not just the immediate parent: a `<span>`/`<code>` nested
+   inside a `<pre>` still needs its OWN text preserved, since `<pre>`,
+   unlike raw-text tags, allows real nested markup)."
+  [document stack]
+  (or (contains? raw-text-tags (name (get-in document [:nodes (peek stack) :tag])))
+      (some #(= :pre (get-in document [:nodes % :tag])) stack)))
+
 (defn parse-into-document
   [html]
   (let [[root-id document] (dom/create-element dom/empty-document :document)
@@ -553,7 +579,10 @@
       (if-let [{:keys [type tag attrs self? text]} (first tokens)]
         (case type
           :text
-          (let [[id document] (dom/create-text-node document text)]
+          (let [text (if (preserve-whitespace-context? document stack)
+                       text
+                       (str/replace text #"\s+" " "))
+                [id document] (dom/create-text-node document text)]
             (recur (dom/append-child document (peek stack) id) stack (next tokens)))
 
           :start

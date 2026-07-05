@@ -657,3 +657,58 @@
     (is (= ["B"] (:children (second (:children tr1)))))
     (is (= 1 (count (:children tr2))))
     (is (= ["C"] (:children (first (:children tr2)))))))
+
+(deftest pre-content-preserves-internal-whitespace-and-newlines
+  ;; The confirmed repro from the bug report: real <pre> elements must
+  ;; preserve their text content's exact whitespace/newlines -- unlike
+  ;; every other element, whose text gets runs of whitespace collapsed to
+  ;; a single space. Before this fix, <pre>'s content went through the
+  ;; SAME generic collapsing as everything else, silently destroying any
+  ;; code block/ASCII-art formatting.
+  (let [document (html/parse-into-document
+                  "<pre>line one\n  line two\n    line three</pre>")
+        tree (dom/tree document)
+        pre (first (:children tree))]
+    (is (= :pre (:tag pre)))
+    (is (= ["line one\n  line two\n    line three"] (:children pre)))))
+
+(deftest pre-preserves-whitespace-in-nested-elements-too
+  ;; <pre>, unlike raw-text tags, allows real nested markup (e.g. a
+  ;; <span> for syntax highlighting) -- text inside such a nested element
+  ;; must ALSO keep its whitespace verbatim, not just <pre>'s own direct
+  ;; text children. Proves the ancestor scan isn't limited to the
+  ;; immediate parent.
+  (let [document (html/parse-into-document "<pre>a\n<span>b\n  c</span>\nd</pre>")
+        tree (dom/tree document)
+        pre (first (:children tree))
+        [text-a span text-d] (:children pre)]
+    (is (= "a\n" text-a))
+    (is (= :span (:tag span)))
+    (is (= ["b\n  c"] (:children span)))
+    (is (= "\nd" text-d))))
+
+(deftest ordinary-elements-still-collapse-whitespace-without-regression
+  ;; No-regression check: moving whitespace collapsing out of the
+  ;; stateless tokenizer and into parse-into-document (where the open-
+  ;; element stack is available to check for a <pre> ancestor) must not
+  ;; change collapsing behavior for ordinary, non-pre content at all.
+  (let [document (html/parse-into-document "<p>Hello\n   world  \n  again</p>")
+        tree (dom/tree document)
+        p (first (:children tree))]
+    (is (= ["Hello world again"] (:children p)))))
+
+(deftest script-and-textarea-content-stay-verbatim-without-regression
+  ;; No-regression check, the one genuinely at risk from this fix: moving
+  ;; the collapse decision into parse-into-document's generic `:text`
+  ;; case (which now runs for EVERY :text token, regardless of origin)
+  ;; must not start collapsing whitespace inside raw-text/RCDATA elements
+  ;; (<script>/<style>/<title>/<textarea>) -- their content was already,
+  ;; correctly, verbatim before this fix via a completely separate
+  ;; tokenizing path, and must stay that way.
+  (let [script-doc (html/parse-into-document
+                    "<script>function f() {\n  return 1;\n}</script>")
+        script (first (:children (dom/tree script-doc)))
+        textarea-doc (html/parse-into-document "<textarea>line1\n  line2</textarea>")
+        textarea (first (:children (dom/tree textarea-doc)))]
+    (is (= ["function f() {\n  return 1;\n}"] (:children script)))
+    (is (= ["line1\n  line2"] (:children textarea)))))
