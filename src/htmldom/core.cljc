@@ -113,6 +113,47 @@
                 {}
                 tokens)))))
 
+(defn- expand-box-shadow-shorthand
+  "Parses a `box-shadow` shorthand value -- mirrors kotoba-lang/cssom's
+   own identically-scoped `expand-box-shadow-shorthand` (same
+   `<offset-x> <offset-y> <blur-radius>? <color>?` grammar, same single-
+   non-inset-shadow-only scope-cut -- see that repo's own docstring for
+   the full rationale) for this repo's OWN, separate initial-HTML-parse
+   inline `style=\"...\"` path, duplicated here for the same no-cssom-
+   dependency reason `expand-border-shorthand`/`expand-text-shadow-
+   shorthand` above already are. Unlike `expand-text-shadow-shorthand`,
+   `none`/blank resolves to an EMPTY map, not a sentinel -- box-shadow is
+   not a real inherited CSS property, so there is no ancestor value to
+   cancel. Returned values are still RAW STRINGS, left for `parse-
+   style`'s own later `parse-style-value` coercion step."
+  [v]
+  (let [v (str/trim (str v))]
+    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+      {}
+      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
+        (reduce (fn [result tok]
+                  (cond
+                    (and (not (contains? result :box-shadow-x))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-x tok)
+
+                    (and (contains? result :box-shadow-x)
+                         (not (contains? result :box-shadow-y))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-y tok)
+
+                    (and (contains? result :box-shadow-y)
+                         (not (contains? result :box-shadow-blur))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-blur tok)
+
+                    (not (contains? result :box-shadow-color))
+                    (assoc result :box-shadow-color tok)
+
+                    :else result))
+                {}
+                tokens)))))
+
 (defn- parse-style-declarations
   "Splits a raw inline `style=\"...\"` attribute's text into `[property
    raw-value important?]` triples -- `raw-value` has any trailing
@@ -146,6 +187,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand longhand-value important?])
                               (expand-text-shadow-shorthand value))
+
+                         (= "box-shadow" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand longhand-value important?])
+                              (expand-box-shadow-shorthand value))
 
                          :else
                          [[(keyword k) value important?]]))

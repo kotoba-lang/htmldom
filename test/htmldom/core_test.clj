@@ -124,6 +124,35 @@
   (is (= #{:text-shadow-x :text-shadow-y :text-shadow-blur :text-shadow-color}
          (html/style-importance "text-shadow: 2px 3px 4px red !important"))))
 
+;; ---- inline style `box-shadow` shorthand expansion ----
+
+(deftest inline-style-box-shadow-shorthand-expands-into-its-four-longhands
+  ;; The confirmed repro from the bug report: before this, style="box-
+  ;; shadow: 4px 5px 8px #000000" was stored verbatim as a single,
+  ;; unrecognized :box-shadow key, which cssom.layout never reads -- a
+  ;; real, common inline-style box-shadow pattern silently painted no
+  ;; shadow at all.
+  (is (= {:box-shadow-x 4 :box-shadow-y 5 :box-shadow-blur 8 :box-shadow-color "#000000"}
+         (html/parse-style "box-shadow: 4px 5px 8px #000000"))))
+
+(deftest inline-style-box-shadow-shorthand-is-order-independent
+  (is (= {:box-shadow-color "red" :box-shadow-x 2 :box-shadow-y 3}
+         (html/parse-style "box-shadow: red 2px 3px"))))
+
+(deftest inline-style-box-shadow-shorthand-omits-whichever-longhands-it-does-not-specify
+  (is (= {:box-shadow-x 2 :box-shadow-y 3 :box-shadow-color "red"}
+         (html/parse-style "box-shadow: 2px 3px red"))
+      "a real, legal box-shadow shorthand may omit the blur radius entirely"))
+
+(deftest inline-style-box-shadow-none-expands-to-an-empty-declaration-unlike-text-shadow
+  ;; Unlike text-shadow, box-shadow is NOT inherited -- no ancestor value
+  ;; to cancel, so an empty declaration (not a sentinel) is correct here.
+  (is (= {} (html/parse-style "box-shadow: none"))))
+
+(deftest inline-style-box-shadow-shorthand-importance-applies-to-every-expanded-longhand
+  (is (= #{:box-shadow-x :box-shadow-y :box-shadow-blur :box-shadow-color}
+         (html/style-importance "box-shadow: 2px 3px 4px red !important"))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")
