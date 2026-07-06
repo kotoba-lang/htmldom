@@ -153,6 +153,32 @@
   (is (= #{:box-shadow-x :box-shadow-y :box-shadow-blur :box-shadow-color}
          (html/style-importance "box-shadow: 2px 3px 4px red !important"))))
 
+;; ---- inline style `outline` shorthand expansion ----
+
+(deftest inline-style-outline-shorthand-expands-into-its-three-longhands
+  ;; The confirmed repro from the bug report: before this, style="outline:
+  ;; 2px solid red" was stored verbatim as a single, unrecognized :outline
+  ;; key, which cssom.layout never reads -- a real, common inline-style
+  ;; outline pattern silently painted no outline at all.
+  (is (= {:outline-width 2 :outline-style "solid" :outline-color "#ff0000"}
+         (html/parse-style "outline: 2px solid #ff0000"))))
+
+(deftest inline-style-outline-shorthand-is-order-independent
+  (is (= {:outline-color "red" :outline-width 3 :outline-style "dashed"}
+         (html/parse-style "outline: red 3px dashed"))))
+
+(deftest inline-style-outline-shorthand-omits-whichever-longhands-it-does-not-specify
+  (is (= {:outline-style "solid" :outline-color "red"}
+         (html/parse-style "outline: solid red"))
+      "a real, legal outline shorthand may omit the width entirely"))
+
+(deftest inline-style-outline-shorthand-recognizes-the-auto-keyword
+  (is (= {:outline-style "auto"} (html/parse-style "outline: auto"))))
+
+(deftest inline-style-outline-shorthand-importance-applies-to-every-expanded-longhand
+  (is (= #{:outline-width :outline-style :outline-color}
+         (html/style-importance "outline: 2px solid red !important"))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")

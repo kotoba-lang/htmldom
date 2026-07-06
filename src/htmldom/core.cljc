@@ -154,6 +154,41 @@
                 {}
                 tokens)))))
 
+(def ^:private outline-style-keywords
+  #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
+
+(defn- expand-outline-shorthand
+  "Parses an `outline` shorthand value -- mirrors kotoba-lang/cssom's own
+   identically-scoped `expand-outline-shorthand` (same order-independent
+   `<line-width> || <line-style> || <color>` grammar, same width/color
+   token forms `expand-border-shorthand` above already commits to) for
+   this repo's OWN, separate initial-HTML-parse inline `style=\"...\"`
+   path, duplicated here for the same no-cssom-dependency reason
+   `expand-border-shorthand`/`expand-text-shadow-shorthand`/`expand-box-
+   shadow-shorthand` above already are. `outline-offset` is a real,
+   SEPARATE (non-shorthand) property, not part of this grammar at all.
+   Returned values are still RAW STRINGS, left for `parse-style`'s own
+   later `parse-style-value` coercion step."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
+    (reduce (fn [result tok]
+              (let [lower (str/lower-case tok)]
+                (cond
+                  (and (not (contains? result :outline-width))
+                       (border-shorthand-width-token? tok))
+                  (assoc result :outline-width tok)
+
+                  (and (not (contains? result :outline-style))
+                       (contains? outline-style-keywords lower))
+                  (assoc result :outline-style tok)
+
+                  (not (contains? result :outline-color))
+                  (assoc result :outline-color tok)
+
+                  :else result)))
+            {}
+            tokens)))
+
 (defn- parse-style-declarations
   "Splits a raw inline `style=\"...\"` attribute's text into `[property
    raw-value important?]` triples -- `raw-value` has any trailing
@@ -192,6 +227,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand longhand-value important?])
                               (expand-box-shadow-shorthand value))
+
+                         (= "outline" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand longhand-value important?])
+                              (expand-outline-shorthand value))
 
                          :else
                          [[(keyword k) value important?]]))
