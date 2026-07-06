@@ -219,7 +219,12 @@
                (if-let [v (or dq sq bare)]
                  (decode-entities v)
                  true)]))
-       (into {})))
+       ;; Real HTML5 tokenization: the FIRST occurrence of a duplicate
+       ;; attribute wins and every later one is a parse error, dropped --
+       ;; `into {}` would instead let the LAST occurrence silently
+       ;; overwrite it, since `assoc` on a repeated key always keeps the
+       ;; newest value.
+       (reduce (fn [acc [k v]] (if (contains? acc k) acc (assoc acc k v))) {})))
 
 (defn- token
   [raw]

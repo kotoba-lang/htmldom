@@ -208,6 +208,45 @@
     (is (= "box" (get-in div [:attrs :class])))
     (is (= ["ok"] (:children div)))))
 
+;; ---- duplicate attributes: real HTML5 tokenization keeps the FIRST
+;;      occurrence, dropping every later one -- `into {}` over the
+;;      attribute-pair seq previously let the LAST occurrence silently
+;;      overwrite it instead ----
+
+(deftest duplicate-attribute-keeps-the-first-occurrence-not-the-last
+  (let [document (html/parse-into-document "<div id=\"first\" id=\"second\">ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "first" (get-in div [:attrs :id])))))
+
+(deftest duplicate-attribute-with-three-occurrences-still-keeps-the-first
+  (let [document (html/parse-into-document "<div data-x=\"1\" data-x=\"2\" data-x=\"3\">ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "1" (get-in div [:attrs :data-x])))))
+
+(deftest duplicate-boolean-attribute-keeps-the-first-bare-form
+  (let [document (html/parse-into-document "<input disabled disabled=\"disabled\">")
+        tree (dom/tree document)
+        input (first (:children tree))]
+    (is (= true (get-in input [:attrs :disabled])))))
+
+(deftest duplicate-attribute-case-insensitive-key-still-keeps-the-first
+  ;; Real HTML attribute names are case-insensitive, and this parser
+  ;; already lower-cases every key -- ID="upper" and id="lower" are the
+  ;; SAME attribute, so the first (by source order) must win.
+  (let [document (html/parse-into-document "<div ID=\"upper\" id=\"lower\">ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "upper" (get-in div [:attrs :id])))))
+
+(deftest non-duplicate-attributes-are-unaffected-by-the-first-wins-fix
+  (let [document (html/parse-into-document "<div id=\"only\" class=\"box\">ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "only" (get-in div [:attrs :id])))
+    (is (= "box" (get-in div [:attrs :class])))))
+
 (deftest back-to-back-comments-do-not-corrupt-parsing
   (let [document (html/parse-into-document "<!-- x --><!-- y --><p>after</p>")
         tree (dom/tree document)]
