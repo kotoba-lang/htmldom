@@ -96,6 +96,34 @@
   (is (= {:border-width 2 :border-color "#00ff00"}
          (html/parse-style "border-width: 2px; border-color: #00ff00"))))
 
+;; ---- inline style `text-shadow` shorthand expansion ----
+
+(deftest inline-style-text-shadow-shorthand-expands-into-its-four-longhands
+  ;; The confirmed repro from the bug report: before this, style="text-
+  ;; shadow: 2px 2px 4px #000000" was stored verbatim as a single,
+  ;; unrecognized :text-shadow key, which cssom.layout's layout-text
+  ;; never reads -- a real, common inline-style text-shadow pattern
+  ;; silently painted no shadow at all.
+  (is (= {:text-shadow-x 2 :text-shadow-y 3 :text-shadow-blur 4 :text-shadow-color "#000000"}
+         (html/parse-style "text-shadow: 2px 3px 4px #000000"))))
+
+(deftest inline-style-text-shadow-shorthand-is-order-independent
+  (is (= {:text-shadow-color "red" :text-shadow-x 2 :text-shadow-y 3}
+         (html/parse-style "text-shadow: red 2px 3px"))))
+
+(deftest inline-style-text-shadow-shorthand-omits-whichever-longhands-it-does-not-specify
+  (is (= {:text-shadow-x 2 :text-shadow-y 3 :text-shadow-color "red"}
+         (html/parse-style "text-shadow: 2px 3px red"))
+      "a real, legal text-shadow shorthand may omit the blur radius entirely"))
+
+(deftest inline-style-text-shadow-none-expands-to-a-real-sentinel-not-an-empty-declaration
+  (is (= {:text-shadow-color "none"}
+         (html/parse-style "text-shadow: none"))))
+
+(deftest inline-style-text-shadow-shorthand-importance-applies-to-every-expanded-longhand
+  (is (= #{:text-shadow-x :text-shadow-y :text-shadow-blur :text-shadow-color}
+         (html/style-importance "text-shadow: 2px 3px 4px red !important"))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")

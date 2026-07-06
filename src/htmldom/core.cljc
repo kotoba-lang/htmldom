@@ -74,6 +74,45 @@
             {}
             tokens)))
 
+(defn- expand-text-shadow-shorthand
+  "Parses a `text-shadow` shorthand value -- mirrors kotoba-lang/cssom's
+   own identically-scoped `expand-text-shadow-shorthand` (same
+   `<offset-x> <offset-y> <blur-radius>? <color>?` grammar, same
+   single-shadow-only scope-cut, same `none` sentinel -- see that repo's
+   own docstring for the full rationale) for this repo's OWN, separate
+   initial-HTML-parse inline `style=\"...\"` path, duplicated here for
+   the same no-cssom-dependency reason `expand-border-shorthand` above
+   already is. Returned values are still RAW STRINGS, left for
+   `parse-style`'s own later `parse-style-value` coercion step, exactly
+   like `expand-border-shorthand` above."
+  [v]
+  (let [v (str/trim (str v))]
+    (if (or (str/blank? v) (= "none" (str/lower-case v)))
+      {:text-shadow-color "none"}
+      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
+        (reduce (fn [result tok]
+                  (cond
+                    (and (not (contains? result :text-shadow-x))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-x tok)
+
+                    (and (contains? result :text-shadow-x)
+                         (not (contains? result :text-shadow-y))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-y tok)
+
+                    (and (contains? result :text-shadow-y)
+                         (not (contains? result :text-shadow-blur))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :text-shadow-blur tok)
+
+                    (not (contains? result :text-shadow-color))
+                    (assoc result :text-shadow-color tok)
+
+                    :else result))
+                {}
+                tokens)))))
+
 (defn- parse-style-declarations
   "Splits a raw inline `style=\"...\"` attribute's text into `[property
    raw-value important?]` triples -- `raw-value` has any trailing
@@ -97,10 +136,18 @@
                    (if (and (seq k) (seq v))
                      (let [important? (boolean (re-find important-declaration-pattern v))
                            value (str/replace v important-declaration-pattern "")]
-                       (if (= "border" (str/lower-case k))
+                       (cond
+                         (= "border" (str/lower-case k))
                          (map (fn [[longhand longhand-value]]
                                 [longhand longhand-value important?])
                               (expand-border-shorthand value))
+
+                         (= "text-shadow" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand longhand-value important?])
+                              (expand-text-shadow-shorthand value))
+
+                         :else
                          [[(keyword k) value important?]]))
                      []))))))
 
