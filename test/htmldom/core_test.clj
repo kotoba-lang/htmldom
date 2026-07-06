@@ -150,6 +150,64 @@
     (is (= :p (:tag p2)))
     (is (= ["after"] (:children p2)))))
 
+(deftest quoted-attribute-value-containing-greater-than-does-not-corrupt-parsing
+  ;; The confirmed repro: a literal, UNESCAPED `>` inside a quoted attribute
+  ;; value is real, common, valid HTML5 (quoted attribute values are scanned
+  ;; verbatim up to their own matching quote -- `>` has no special meaning
+  ;; inside them at all) -- e.g. a title/alt containing a comparison, or the
+  ;; extremely common inline `onclick="if (a>b) foo()"`. A naive index-of
+  ;; scan for the tag's closing `>` previously truncated the tag at the
+  ;; INNER `>`, corrupting :attrs (losing every attribute after it) and
+  ;; leaking the quoted value's own remainder as a stray text node,
+  ;; confirmed via direct REPL reproduction before this fix.
+  (let [document (html/parse-into-document
+                  "<p>before</p><input title=\"a > b\" id=\"x\"><p>after</p>")
+        tree (dom/tree document)
+        [p1 input p2] (:children tree)]
+    (is (= 3 (count (:children tree)))
+        "the corrupted-parse symptom: this used to be more/fewer than 3 real children")
+    (is (= :input (:tag input)))
+    (is (= "a > b" (get-in input [:attrs :title]))
+        "the quoted value survives intact, including its own inner >")
+    (is (= "x" (get-in input [:attrs :id]))
+        "every attribute AFTER the inner > must survive too, not just before it")
+    (is (= :p (:tag p2)))
+    (is (= ["after"] (:children p2))
+        "parsing resumes correctly after the tag's REAL closing >, not the inner one")))
+
+(deftest onclick-attribute-with-a-real-comparison-operator-does-not-corrupt-parsing
+  ;; The single most common real-world trigger for this bug class: an inline
+  ;; event handler attribute containing a `>` comparison.
+  (let [document (html/parse-into-document
+                  "<a onclick=\"if (a>b) foo()\">text</a><p>after</p>")
+        tree (dom/tree document)
+        [a p] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :a (:tag a)))
+    (is (= "if (a>b) foo()" (get-in a [:attrs :onclick])))
+    (is (= ["text"] (:children a)))
+    (is (= :p (:tag p)))))
+
+(deftest single-quoted-attribute-value-containing-greater-than-does-not-corrupt-parsing
+  (let [document (html/parse-into-document "<div title='a > b'>ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "a > b" (get-in div [:attrs :title])))
+    (is (= ["ok"] (:children div)))))
+
+(deftest multiple-greater-than-characters-inside-one-quoted-value-all-survive
+  (let [document (html/parse-into-document "<div title=\"a > b > c\">ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "a > b > c" (get-in div [:attrs :title])))))
+
+(deftest ordinary-unquoted-attribute-with-no-greater-than-is-unaffected
+  (let [document (html/parse-into-document "<div class=box>ok</div>")
+        tree (dom/tree document)
+        div (first (:children tree))]
+    (is (= "box" (get-in div [:attrs :class])))
+    (is (= ["ok"] (:children div)))))
+
 (deftest back-to-back-comments-do-not-corrupt-parsing
   (let [document (html/parse-into-document "<!-- x --><!-- y --><p>after</p>")
         tree (dom/tree document)]

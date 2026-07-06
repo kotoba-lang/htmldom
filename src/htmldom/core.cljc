@@ -280,6 +280,35 @@
    not become `&`."
   #{"title" "textarea"})
 
+(defn- tag-close-index
+  "Index of the real closing '>' for a start/end tag beginning at `lt` (the
+   index of the tag's own '<'), scanned from `lt`. A naive index-of the next
+   '>' breaks on a real, common, valid pattern: a literal, UNESCAPED '>'
+   inside a single- or double-quoted attribute value (e.g. `title=\"a > b\"`,
+   or the extremely common inline `onclick=\"if (a>b) foo()\"`) is real
+   HTML5 -- quoted attribute values are scanned verbatim up to their own
+   matching quote, `>` has no special meaning inside them at all. A naive
+   scan truncates the tag at that inner '>', corrupting `:attrs` (losing
+   every attribute after it) and leaking the quoted value's own remainder as
+   a stray text node, confirmed via direct REPL reproduction before this
+   fix. This tracks whether the scan is currently inside an open quote span
+   and only treats a '>' outside of one as the tag's real terminator.
+   Returns nil if no real closing '>' exists in the rest of the input
+   (matches the old naive index-of's own nil-for-unmatched contract,
+   including an unterminated quote -- the loop then never exits the quote
+   state before reaching the end of input)."
+  [html lt]
+  (let [len (count html)]
+    (loop [pos (inc lt) quote nil]
+      (if (>= pos len)
+        nil
+        (let [c (subs html pos (inc pos))]
+          (cond
+            quote (recur (inc pos) (when-not (= c quote) quote))
+            (or (= c "\"") (= c "'")) (recur (inc pos) c)
+            (= c ">") pos
+            :else (recur (inc pos) quote)))))))
+
 (defn- raw-text-tag-name
   "If html[lt..gt] (inclusive angle brackets, gt = index of the tag's '>')
    opens a raw-text element, return its lower-cased tag name. Returns nil for
@@ -338,7 +367,7 @@
             (recur (if end (+ end 3) len) acc))
 
           :else
-          (let [gt (str/index-of html ">" lt)]
+          (let [gt (tag-close-index html lt)]
             (if (nil? gt)
               ;; No terminating '>' anywhere in the rest of the input: drop
               ;; this lone '<' (matches the old regex tokenizer's lenient
