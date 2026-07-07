@@ -15,6 +15,123 @@
   #{"area" "base" "br" "col" "embed" "hr" "img" "input" "link" "meta"
     "param" "source" "track" "wbr"})
 
+;; ---- calc() -- constant, percentage-free arithmetic only ----
+;;
+;; Mirrors cssom.core's own calc(...) pipeline (calc-pattern/calc-number-at/
+;; tokenize-calc-expr/parse-calc-level/parse-calc-ast/eval-calc-node/
+;; parse-calc) exactly -- same bounded scope (plain numbers/px lengths only,
+;; no percentage/other relative unit, real CSS's own arithmetic-validity
+;; rules), same tokenize -> parse (precedence climbing) -> evaluate shape.
+;; This namespace's own inline `style="..."` values reach `parse-style-value`
+;; below without ever going through cssom's cascade, so a `calc(...)` in an
+;; inline attribute needs its own copy of this pipeline -- otherwise it
+;; passes through as a raw string and downstream numeric coercion (e.g.
+;; layout's own first-digit-run scrape) silently reads the wrong number.
+
+(def ^:private calc-pattern
+  #"(?is)calc\((.*)\)")
+
+(defn- calc-number-at
+  [s idx]
+  (when-let [num-str (re-find #"^\d+(?:\.\d+)?" (subs s idx))]
+    (let [after (+ idx (count num-str))
+          px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
+          end (if px? (+ after 2) after)
+          value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))]
+      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))
+
+(defn- tokenize-calc-expr
+  [s]
+  (let [n (count s)]
+    (loop [idx 0 tokens []]
+      (cond
+        (= idx n) tokens
+        (re-matches #"\s" (str (nth s idx))) (recur (inc idx) tokens)
+        :else
+        (case (nth s idx)
+          \+ (recur (inc idx) (conj tokens {:calc/type :plus}))
+          \- (recur (inc idx) (conj tokens {:calc/type :minus}))
+          \* (recur (inc idx) (conj tokens {:calc/type :star}))
+          \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
+          \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
+          \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
+          (if-let [[operand next-idx] (calc-number-at s idx)]
+            (recur next-idx (conj tokens operand))
+            nil))))))
+
+(defn- parse-calc-level
+  [tokens level]
+  (if (= level 2)
+    (when (seq tokens)
+      (let [t (first tokens)]
+        (case (:calc/type t)
+          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
+                   [{:calc/op :neg :calc/arg node} toks])
+          :plus (parse-calc-level (rest tokens) 2)
+          :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
+                    (rest tokens)]
+          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
+                    (when (and (seq toks) (= :rparen (:calc/type (first toks))))
+                      [node (rest toks)]))
+          nil)))
+    (let [ops (if (= level 0) #{:plus :minus} #{:star :slash})
+          op->ast (fn [op] (case op :plus :add :minus :sub :star :mul :slash :div))]
+      (when-let [[left toks] (parse-calc-level tokens (inc level))]
+        (loop [left left toks toks]
+          (if (and (seq toks) (contains? ops (:calc/type (first toks))))
+            (let [op (:calc/type (first toks))]
+              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
+                (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
+                nil))
+            [left toks]))))))
+
+(defn- parse-calc-ast
+  [expr-text]
+  (when-let [tokens (tokenize-calc-expr expr-text)]
+    (when-let [[node toks] (parse-calc-level tokens 0)]
+      (when (empty? toks) node))))
+
+(defn- eval-calc-node
+  [node]
+  (case (:calc/op node)
+    :num [(:calc/value node) (:calc/unit node)]
+
+    :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
+           [(- v) u])
+
+    :add (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(+ lv rv) lu])))
+
+    :sub (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (= lu ru) [(- lv rv) lu])))
+
+    :mul (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (cond
+               (= lu :number) [(* lv rv) ru]
+               (= ru :number) [(* lv rv) lu]
+               :else nil)))
+
+    :div (when-let [[lv lu] (eval-calc-node (:calc/left node))]
+           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
+             (when (and (= ru :number) (not (zero? rv)))
+               [(/ lv rv) lu])))
+
+    nil))
+
+(defn- calc-result->number
+  [value]
+  (let [truncated (long value)]
+    (if (== value truncated) truncated value)))
+
+(defn- parse-calc
+  [expr-text]
+  (when-let [node (parse-calc-ast expr-text)]
+    (when-let [[value _unit] (eval-calc-node node)]
+      (calc-result->number value))))
+
 (defn- parse-style-value
   [v]
   (let [v (str/trim v)]
@@ -22,7 +139,10 @@
       (re-matches #"-?\d+" v) #?(:clj (Long/parseLong v) :cljs (js/parseInt v 10))
       (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
                                    :cljs (js/parseInt v 10))
-      :else v)))
+      :else
+      (if-let [[_ inner] (re-matches calc-pattern v)]
+        (or (parse-calc inner) v)
+        v))))
 
 (def ^:private important-declaration-pattern
   ;; Mirrors cssom.core's own `!important` regex convention exactly (same

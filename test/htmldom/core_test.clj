@@ -1284,3 +1284,75 @@
         script (first (:children (dom/tree script-doc)))]
     (is (= ["\nPage Title"] (:children title)))
     (is (= ["\nconsole.log(1)"] (:children script)))))
+
+;; ---- inline style calc() ----
+;;
+;; Before this fix, an inline `style="width: calc(100px + 20px)"` attribute
+;; never resolved its calc() at all -- cssom's own cascade (rule-based CSS,
+;; e.g. `.box { width: calc(100px + 20px) }`) already resolved constant
+;; calc() correctly via cssom.core's own calc pipeline, but this namespace's
+;; `parse-style-value` (the coercion step behind every *inline* style=""
+;; attribute, which never goes through cssom's cascade at all) had no calc()
+;; support of its own, so the raw string passed through untouched and
+;; downstream numeric coercion silently read the wrong number (the first
+;; digit run it found) instead of the correct arithmetic result -- confirmed
+;; end-to-end via browser.core/load-html before this fix: the same
+;; calc(100px + 20px) rendered width 100 via an inline style= attribute but
+;; the correct 120 via an equivalent CSS rule.
+
+(defn- calc-probe
+  [prop value]
+  (get (html/parse-style (str prop ": " value)) (keyword prop)))
+
+(deftest inline-style-calc-constant-expression-resolves-to-a-plain-number
+  (is (= 120 (calc-probe "width" "calc(100px + 20px)"))
+      "two px lengths added together")
+  (is (= 16 (calc-probe "padding" "calc(2 * 8px)"))
+      "a plain number times a px length")
+  (is (= 25 (calc-probe "gap" "calc(100px / 4)"))
+      "a px length divided by a plain number")
+  (is (= 120 (calc-probe "width" "calc( 100px + 20px )"))
+      "whitespace immediately inside the parens is insignificant"))
+
+(deftest inline-style-calc-multiplication-and-division-bind-tighter-than-addition-and-subtraction
+  (is (= 116 (calc-probe "width" "calc(100px + 2 * 8px)"))
+      "* must bind before + -- 100px + (2 * 8px) = 116, not (100 + 2) * 8 = 816"))
+
+(deftest inline-style-calc-nested-parens-override-default-precedence
+  (is (= 32 (calc-probe "width" "calc((10px + 6px) * 2)"))))
+
+(deftest inline-style-calc-supports-negative-numbers
+  (is (= 15 (calc-probe "width" "calc(-5px + 20px)"))))
+
+(deftest inline-style-calc-keyword-is-case-insensitive-like-real-css
+  (is (= 120 (calc-probe "width" "CALC(100px + 20px)"))))
+
+(deftest inline-style-calc-division-by-zero-does-not-resolve
+  (is (= "calc(100px / 0)" (calc-probe "width" "calc(100px / 0)"))
+      "real CSS: division by the number zero is invalid calc(), not
+       Infinity/NaN -- falls through as the same raw unparsed string"))
+
+(deftest inline-style-calc-with-a-percentage-stays-unresolved
+  (is (= "calc(100% - 20px)" (calc-probe "width" "calc(100% - 20px)"))
+      "a percentage inside calc() needs real layout against the
+       container's own actual size -- out of this engine's bounded
+       constant-calc() subset -- so the whole declaration falls through as
+       the same raw, unparsed string, never a guessed number"))
+
+(deftest inline-style-malformed-calc-does-not-crash-and-stays-unresolved
+  (is (= "calc(100px +)" (calc-probe "width" "calc(100px +)"))
+      "a dangling operator with no right-hand operand")
+  (is (= "calc(100px 20px)" (calc-probe "height" "calc(100px 20px)"))
+      "two operands with no operator between them"))
+
+(deftest inline-style-calc-resolves-through-the-full-inline-attribute-parse
+  ;; The exact confirmed repro: a real <div style="..."> attribute, parsed
+  ;; through the full parse-into-document path (not just parse-style in
+  ;; isolation), ends up with the resolved plain number on the node's own
+  ;; :attrs, exactly like a bare `<n>px` value already did.
+  (let [document (html/parse-into-document
+                   "<main><div style=\"width: calc(100px + 20px)\">x</div></main>")
+        root (dom/node document (:root document))
+        main (dom/node document (first (:children root)))
+        div (dom/node document (first (:children main)))]
+    (is (= 120 (get-in div [:attrs :style/width])))))
