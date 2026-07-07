@@ -179,6 +179,32 @@
   (is (= #{:outline-width :outline-style :outline-color}
          (html/style-importance "outline: 2px solid red !important"))))
 
+(deftest inline-style-font-shorthand-expands-into-its-five-longhands
+  ;; The confirmed repro: before this, style="font: italic bold 14px/1.5
+  ;; sans-serif" was stored verbatim as a single, unrecognized :font key,
+  ;; which cssom.layout never reads -- none of the 5 real longhands this
+  ;; shorthand expands to were ever actually set.
+  (is (= {:font-style "italic" :font-weight "bold" :font-size 14
+          :line-height "1.5" :font-family "sans-serif"}
+         (html/parse-style "font: italic bold 14px/1.5 sans-serif"))))
+
+(deftest inline-style-font-shorthand-omits-whichever-leading-longhands-it-does-not-specify
+  (is (= {:font-size 12 :font-family "Arial, sans-serif"}
+         (html/parse-style "font: 12px Arial, sans-serif"))
+      "a real, legal font shorthand may omit style/weight/line-height entirely"))
+
+(deftest inline-style-font-shorthand-recognizes-a-numeric-font-weight
+  (is (= {:font-weight 700 :font-size 16 :font-family "monospace"}
+         (html/parse-style "font: 700 16px monospace"))))
+
+(deftest inline-style-font-shorthand-missing-a-mandatory-font-size-degrades-to-no-op
+  (is (= {} (html/parse-style "font: sans-serif"))
+      "a real font shorthand missing its mandatory font-size is entirely invalid -- dropped, not partially applied"))
+
+(deftest inline-style-font-shorthand-importance-applies-to-every-expanded-longhand
+  (is (= #{:font-style :font-weight :font-size :line-height :font-family}
+         (html/style-importance "font: italic bold 14px/1.5 sans-serif !important"))))
+
 (deftest select-initializes-value-from-selected-option
   (let [document (html/parse-into-document
                   "<select><option value=\"a\">A</option><option value=\"b\" selected>B</option></select>")

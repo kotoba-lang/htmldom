@@ -189,6 +189,50 @@
             {}
             tokens)))
 
+(def ^:private font-shorthand-style-keywords
+  #{"italic" "oblique"})
+
+(def ^:private font-shorthand-weight-keywords
+  #{"bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900"})
+
+(def ^:private font-shorthand-skip-keywords
+  #{"normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded"
+    "extra-condensed" "extra-expanded" "ultra-condensed" "ultra-expanded"})
+
+(defn- expand-font-shorthand
+  "Parses a `font` shorthand value -- mirrors kotoba-lang/cssom's own
+   identically-scoped `expand-font-shorthand` (same optional leading
+   style/weight run, same mandatory `<font-size>[/<line-height>]?` then
+   `<font-family>` positional grammar, same `normal`/variant/stretch
+   skip-and-drop keywords, same missing-mandatory-size-or-family
+   degrades-to-empty-map behavior -- see that repo's own docstring for
+   the full rationale) for this repo's OWN, separate initial-HTML-parse
+   inline `style=\"...\"` path, duplicated here for the same no-cssom-
+   dependency reason `expand-border-shorthand`/`expand-text-shadow-
+   shorthand`/`expand-box-shadow-shorthand`/`expand-outline-shorthand`
+   above already are. Returned values are still RAW STRINGS, left for
+   `parse-style`'s own later `parse-style-value` coercion step."
+  [v]
+  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))
+        [leading remaining] (split-with (fn [tok]
+                                           (let [lower (str/lower-case tok)]
+                                             (or (contains? font-shorthand-style-keywords lower)
+                                                 (contains? font-shorthand-weight-keywords lower)
+                                                 (contains? font-shorthand-skip-keywords lower))))
+                                         tokens)]
+    (if (or (empty? remaining) (empty? (rest remaining)))
+      {}
+      (let [size-token (first remaining)
+            family (str/join " " (rest remaining))
+            style-tok (some #(when (contains? font-shorthand-style-keywords (str/lower-case %)) %) leading)
+            weight-tok (some #(when (contains? font-shorthand-weight-keywords (str/lower-case %)) %) leading)
+            [size-part lh-part] (str/split size-token #"/" 2)]
+        (cond-> {:font-size size-part
+                 :font-family family}
+          style-tok (assoc :font-style style-tok)
+          weight-tok (assoc :font-weight weight-tok)
+          lh-part (assoc :line-height lh-part))))))
+
 (defn- parse-style-declarations
   "Splits a raw inline `style=\"...\"` attribute's text into `[property
    raw-value important?]` triples -- `raw-value` has any trailing
@@ -232,6 +276,11 @@
                          (map (fn [[longhand longhand-value]]
                                 [longhand longhand-value important?])
                               (expand-outline-shorthand value))
+
+                         (= "font" (str/lower-case k))
+                         (map (fn [[longhand longhand-value]]
+                                [longhand longhand-value important?])
+                              (expand-font-shorthand value))
 
                          :else
                          [[(keyword k) value important?]]))
