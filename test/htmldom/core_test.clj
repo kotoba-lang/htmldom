@@ -581,6 +581,45 @@
     (is (= :p (:tag p)))
     (is (= ["caf\u00e9 \ud83d\ude00"] (:children p)))))
 
+(deftest numeric-entities-in-the-c1-control-range-decode-through-the-windows-1252-remap
+  ;; WHATWG spec's "numeric character reference end state": a numeric
+  ;; character reference naming a codepoint in the C1 control range
+  ;; (0x80-0x9F) is reinterpreted through a fixed Windows-1252 table
+  ;; instead of being emitted as that (invisible, meaningless in real
+  ;; content) raw control character. This is the textbook "smart quotes
+  ;; from Word/legacy CMS content turn into garbage" bug -- previously
+  ;; `&#146;` decoded to the raw C1 control character U+0092 instead of
+  ;; the real single right quote U+2019 authors actually intended.
+  (let [document (html/parse-into-document
+                  "<p>&#145;a&#146; &#147;b&#148; &#150;&#151; &#128;</p>")
+        tree (dom/tree document)
+        p (first (:children tree))]
+    (is (= :p (:tag p)))
+    (is (= ["‘a’ “b” –— €"] (:children p))
+        "left/right single quotes, left/right double quotes, en-dash, em-dash, and the euro sign all resolve to their real Windows-1252-intended characters")))
+
+(deftest numeric-entity-for-null-codepoint-decodes-to-the-replacement-character
+  ;; Same spec algorithm, a sibling rule right next to the C1 remap: a
+  ;; numeric reference naming codepoint 0 must become U+FFFD REPLACEMENT
+  ;; CHARACTER, never a literal embedded NUL.
+  (let [document (html/parse-into-document "<p>a&#0;b</p>")
+        tree (dom/tree document)
+        p (first (:children tree))]
+    (is (= ["a�b"] (:children p)))))
+
+(deftest numeric-entities-for-the-five-unmapped-c1-codepoints-stay-unchanged
+  ;; Five codepoints in the C1 range (0x81/0x8D/0x8F/0x90/0x9D) have NO
+  ;; Windows-1252 mapping at all -- the spec table deliberately omits
+  ;; them, so they fall through unchanged as their own raw codepoint,
+  ;; same as before this fix. Confirms the remap is a precise, bounded
+  ;; 27-entry table, not an over-eager "every C1 codepoint changes"
+  ;; blanket rule.
+  (let [document (html/parse-into-document "<p>&#129;&#141;&#143;&#144;&#157;</p>")
+        tree (dom/tree document)
+        p (first (:children tree))]
+    (is (= [(str (char 0x81) (char 0x8D) (char 0x8F) (char 0x90) (char 0x9D))]
+           (:children p)))))
+
 (deftest pragmatic-named-entity-subset-decodes-correctly
   (let [document (html/parse-into-document
                   "<p>&nbsp;&copy;&reg;&trade;&mdash;&ndash;&hellip;</p>")
