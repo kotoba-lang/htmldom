@@ -116,16 +116,21 @@
 (defn- expand-box-shadow-shorthand
   "Parses a `box-shadow` shorthand value -- mirrors kotoba-lang/cssom's
    own identically-scoped `expand-box-shadow-shorthand` (same
-   `<offset-x> <offset-y> <blur-radius>? <color>?` grammar, same single-
-   non-inset-shadow-only scope-cut -- see that repo's own docstring for
-   the full rationale) for this repo's OWN, separate initial-HTML-parse
-   inline `style=\"...\"` path, duplicated here for the same no-cssom-
-   dependency reason `expand-border-shorthand`/`expand-text-shadow-
-   shorthand` above already are. Unlike `expand-text-shadow-shorthand`,
-   `none`/blank resolves to an EMPTY map, not a sentinel -- box-shadow is
-   not a real inherited CSS property, so there is no ancestor value to
-   cancel. Returned values are still RAW STRINGS, left for `parse-
-   style`'s own later `parse-style-value` coercion step."
+   `<offset-x> <offset-y> <blur-radius>? <spread-radius>? <color>?`
+   grammar, same single-non-inset-shadow-only scope-cut -- see that
+   repo's own docstring for the full rationale, including the real,
+   severe spread-radius bug it fixes: a 4th length-shaped token used to
+   fall through into `:box-shadow-color`, silently corrupting/dropping
+   the REAL trailing color token, for the extremely common real-world
+   5-token `box-shadow: 0 1px 2px 0 rgba(...)` shape) for this repo's
+   OWN, separate initial-HTML-parse inline `style=\"...\"` path,
+   duplicated here for the same no-cssom-dependency reason
+   `expand-border-shorthand`/`expand-text-shadow-shorthand` above
+   already are. Unlike `expand-text-shadow-shorthand`, `none`/blank
+   resolves to an EMPTY map, not a sentinel -- box-shadow is not a real
+   inherited CSS property, so there is no ancestor value to cancel.
+   Returned values are still RAW STRINGS, left for `parse-style`'s own
+   later `parse-style-value` coercion step."
   [v]
   (let [v (str/trim (str v))]
     (if (or (str/blank? v) (= "none" (str/lower-case v)))
@@ -146,6 +151,11 @@
                          (not (contains? result :box-shadow-blur))
                          (border-shorthand-width-token? tok))
                     (assoc result :box-shadow-blur tok)
+
+                    (and (contains? result :box-shadow-blur)
+                         (not (contains? result :box-shadow-spread))
+                         (border-shorthand-width-token? tok))
+                    (assoc result :box-shadow-spread tok)
 
                     (not (contains? result :box-shadow-color))
                     (assoc result :box-shadow-color tok)

@@ -153,6 +153,16 @@
   (is (= #{:box-shadow-x :box-shadow-y :box-shadow-blur :box-shadow-color}
          (html/style-importance "box-shadow: 2px 3px 4px red !important"))))
 
+(deftest inline-style-box-shadow-shorthand-fifth-token-is-spread-radius-not-color
+  ;; The real bug this fixes: before this, a 4th length-shaped token (the
+  ;; extremely common real-world 5-token box-shadow: 0 1px 2px 0 rgba(...)
+  ;; shape) fell through into :box-shadow-color, and the REAL trailing
+  ;; color token was then silently DROPPED entirely.
+  (is (= {:box-shadow-x 0 :box-shadow-y 1 :box-shadow-blur 2 :box-shadow-spread 0
+          :box-shadow-color "rgba(0,0,0,0.1)"}
+         (html/parse-style "box-shadow: 0 1px 2px 0 rgba(0,0,0,0.1)"))
+      "the 4th length token must become spread-radius, and the real color must survive"))
+
 ;; ---- inline style `outline` shorthand expansion ----
 
 (deftest inline-style-outline-shorthand-expands-into-its-three-longhands
