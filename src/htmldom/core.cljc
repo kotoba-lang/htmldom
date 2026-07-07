@@ -602,6 +602,17 @@
                       ;; closing tag, then the real closing tag itself.
                       (let [close-idx (raw-text-close-index html raw-tag (inc gt))
                             text (subs html (inc gt) close-idx)
+                            ;; WHATWG spec: if a <textarea>'s content begins
+                            ;; with a single U+000A LINE FEED, that one
+                            ;; character is silently dropped -- authoring
+                            ;; convenience for the extremely common
+                            ;; "<textarea>\nvalue" source-formatting habit
+                            ;; (immediately newlining after the open tag).
+                            ;; Scoped to `textarea` only, matching the spec --
+                            ;; `title`/`script`/`style` get no such treatment.
+                            text (if (and (= raw-tag "textarea") (str/starts-with? text "\n"))
+                                   (subs text 1)
+                                   text)
                             ;; RCDATA (title/textarea): entities decode even
                             ;; though tags don't parse. True raw text
                             ;; (script/style): verbatim, no decoding -- a JS
@@ -1002,8 +1013,26 @@
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)
-                             (dom/append-child (peek stack) id))]
-            (recur document (if self? stack (conj stack id)) (next tokens)))
+                             (dom/append-child (peek stack) id))
+                remaining (next tokens)
+                ;; WHATWG spec: if a <pre>'s content begins with a single
+                ;; U+000A LINE FEED, that one character is silently dropped
+                ;; -- the same authoring-convenience rule textarea gets
+                ;; above, but <pre> allows real nested markup so it can't be
+                ;; handled at tokenize time; only the token IMMEDIATELY
+                ;; following <pre>'s own start tag is eligible (a nested
+                ;; child's own leading newline, e.g. <pre><span>\nx</span>
+                ;; </pre>, is untouched -- that <span>'s first token here is
+                ;; a :start, not :text, so this check simply doesn't match).
+                remaining (if (and (= :pre tag-kw) (not self?)
+                                   (= :text (:type (first remaining)))
+                                   (str/starts-with? (:text (first remaining)) "\n"))
+                            (let [stripped (subs (:text (first remaining)) 1)]
+                              (if (seq stripped)
+                                (cons (assoc (first remaining) :text stripped) (next remaining))
+                                (next remaining)))
+                            remaining)]
+            (recur document (if self? stack (conj stack id)) remaining))
 
           :end
           (let [match-idx (find-top-match-index document stack (keyword tag))]

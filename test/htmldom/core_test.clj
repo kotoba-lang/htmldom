@@ -1188,3 +1188,60 @@
         textarea (first (:children (dom/tree textarea-doc)))]
     (is (= ["function f() {\n  return 1;\n}"] (:children script)))
     (is (= ["line1\n  line2"] (:children textarea)))))
+
+(deftest pre-drops-exactly-one-leading-line-feed
+  ;; WHATWG spec: if a <pre>'s content begins with a single U+000A LINE
+  ;; FEED, that one character is silently dropped -- authoring
+  ;; convenience for the extremely common "<pre>\ncode..." source-
+  ;; formatting habit. Previously entirely unhandled -- neither the
+  ;; tokenizer nor parse-into-document had any leading-newline logic at
+  ;; all, so this LF survived into the pre's own text content verbatim.
+  (let [pre (fn [html] (first (:children (dom/tree (html/parse-into-document html)))))]
+    (is (= ["foo"] (:children (pre "<pre>\nfoo</pre>")))
+        "the single leading LF is dropped, not just any leading whitespace run")
+    (is (= ["\nfoo"] (:children (pre "<pre>\n\nfoo</pre>")))
+        "exactly ONE leading LF is dropped -- a second one immediately after stays, proving this isn't a trim-all")
+    (is (= ["foo"] (:children (pre "<pre>foo</pre>")))
+        "no regression: content with no leading LF at all is untouched")
+    (is (= [] (:children (pre "<pre>\n</pre>")))
+        "a pre whose only content is the single leading LF ends up with zero children, not a stray empty text node")))
+
+(deftest pre-leading-lf-strip-only-applies-to-pres-own-immediate-text-not-nested-elements
+  ;; <pre>, unlike <textarea>, allows real nested markup -- the leading-LF
+  ;; rule must only ever apply to the token IMMEDIATELY following <pre>'s
+  ;; own start tag, never to a nested descendant's own separate leading
+  ;; newline (e.g. a <span> for syntax highlighting starting a new line).
+  (let [document (html/parse-into-document "<pre><span>\nx</span></pre>")
+        tree (dom/tree document)
+        pre (first (:children tree))
+        span (first (:children pre))]
+    (is (= :span (:tag span)))
+    (is (= ["\nx"] (:children span))
+        "the nested span's own leading newline is untouched -- only pre's OWN immediate first token is eligible")))
+
+(deftest textarea-drops-exactly-one-leading-line-feed
+  ;; The same WHATWG spec rule as <pre> above, but scoped to `textarea`
+  ;; specifically -- `title`/`script`/`style` (this file's other
+  ;; raw-text/RCDATA tags) do NOT get this treatment, only pre/textarea/
+  ;; listing per spec.
+  (let [textarea (fn [html] (first (:children (dom/tree (html/parse-into-document html)))))]
+    (is (= ["foo"] (:children (textarea "<textarea>\nfoo</textarea>")))
+        "the single leading LF is dropped from the textarea's own raw text content")
+    (is (= ["\nfoo"] (:children (textarea "<textarea>\n\nfoo</textarea>")))
+        "exactly ONE leading LF is dropped, a second one immediately after stays")
+    (is (= ["foo"] (:children (textarea "<textarea>foo</textarea>")))
+        "no regression: content with no leading LF at all is untouched")
+    (is (= [] (:children (textarea "<textarea>\n</textarea>")))
+        "a textarea whose only content is the single leading LF ends up with zero children, not a stray empty text node")))
+
+(deftest title-and-script-do-not-drop-a-leading-line-feed-unlike-pre-and-textarea
+  ;; Confirms the leading-LF-drop rule is correctly scoped to pre/
+  ;; textarea only -- <title> and <script> (this file's other raw-text/
+  ;; RCDATA tags) must NOT silently drop a real leading newline the
+  ;; author's own source genuinely contains.
+  (let [title-doc (html/parse-into-document "<title>\nPage Title</title>")
+        title (first (:children (dom/tree title-doc)))
+        script-doc (html/parse-into-document "<script>\nconsole.log(1)</script>")
+        script (first (:children (dom/tree script-doc)))]
+    (is (= ["\nPage Title"] (:children title)))
+    (is (= ["\nconsole.log(1)"] (:children script)))))
