@@ -559,8 +559,28 @@
           ;; a `>` inside the comment body can't truncate it and corrupt the
           ;; rest of the token stream. Comments produce no token (discarded),
           ;; matching prior behavior.
+          ;;
+          ;; Real HTML5's two "abrupt-closing-of-empty-comment" forms --
+          ;; `<!-->` and `<!--->` -- are complete, empty, immediately-
+          ;; terminated comments (their own named parse error in the spec),
+          ;; reusing the marker's OWN trailing `--` as the closing marker's
+          ;; leading `--`. Searching from `lt + 4` (strictly after those two
+          ;; dashes) can never see that overlap, so it always missed both
+          ;; forms and searched for the NEXT literal `-->` anywhere later in
+          ;; the document instead -- silently swallowing everything up to
+          ;; (or, if none exists, all the way to end-of-input) as comment
+          ;; content, discarding real markup wholesale. Confirmed via direct
+          ;; REPL reproduction: `<main><p>before</p><!--><p>after</p></main>`
+          ;; parsed to a `<main>` with only ONE child -- `<p>after</p>` and
+          ;; its text node never existed in the tree at all. Searching from
+          ;; `lt + 2` instead (right after the bare `<!`) lets the marker's
+          ;; own `--` double as the closer for the two abrupt-closing forms,
+          ;; while an ordinary `<!--content-->` is unaffected: the search
+          ;; only matches early if the very next character really is `>`,
+          ;; otherwise it keeps scanning forward to the real terminator
+          ;; exactly as before.
           (str/starts-with? (subs html lt) "<!--")
-          (let [end (str/index-of html "-->" (+ lt 4))]
+          (let [end (str/index-of html "-->" (+ lt 2))]
             (recur (if end (+ end 3) len) acc))
 
           :else

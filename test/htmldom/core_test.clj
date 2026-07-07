@@ -269,6 +269,65 @@
     (is (= :p (:tag p2)))
     (is (= ["after"] (:children p2)))))
 
+(deftest abrupt-closing-empty-comment-does-not-swallow-the-rest-of-the-document
+  ;; Real HTML5's "abrupt-closing-of-empty-comment" parse error: `<!-->`
+  ;; (5 chars) is a complete, empty, immediately-terminated comment, reusing
+  ;; its own trailing `--` as the closing marker's leading `--` -- previously
+  ;; the comment-terminator search started strictly AFTER those two dashes,
+  ;; so it could never see the overlap and instead searched for the NEXT
+  ;; literal `-->` anywhere later in the document, silently discarding
+  ;; everything up to (or, since none existed here, all the way to
+  ;; end-of-input) as comment content -- confirmed via direct REPL
+  ;; reproduction before touching source: `<p>after</p>` never existed in
+  ;; the parsed tree at all.
+  (let [document (html/parse-into-document "<p>before</p><!--><p>after</p>")
+        tree (dom/tree document)
+        [p1 p2] (:children tree)]
+    (is (= 2 (count (:children tree)))
+        "the corrupted-parse symptom: <p>after</p> used to be entirely missing")
+    (is (= :p (:tag p1)))
+    (is (= ["before"] (:children p1)))
+    (is (= :p (:tag p2)))
+    (is (= ["after"] (:children p2)))))
+
+(deftest abrupt-closing-empty-comment-six-char-variant-does-not-swallow-the-rest
+  ;; The OTHER real HTML5 abrupt-closing form: `<!--->` (6 chars, one more
+  ;; dash than the 5-char form above) -- also a complete, empty comment.
+  (let [document (html/parse-into-document "<p>before</p><!---><p>after</p>")
+        tree (dom/tree document)
+        [p1 p2] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :p (:tag p1)))
+    (is (= ["before"] (:children p1)))
+    (is (= :p (:tag p2)))
+    (is (= ["after"] (:children p2)))))
+
+(deftest ordinary-comment-with-content-starting-in-a-dash-is-unaffected
+  ;; Guards the fix's own boundary: searching from right after the bare
+  ;; `<!` (not the marker's full `<!--`) must only match early when the
+  ;; very next character really is `>` -- an ordinary comment whose content
+  ;; happens to start with a literal `-` (a real, legal comment shape) must
+  ;; still scan all the way to its own real `-->` terminator, not stop short.
+  (let [document (html/parse-into-document "<p>before</p><!--- note --><p>after</p>")
+        tree (dom/tree document)
+        [p1 p2] (:children tree)]
+    (is (= 2 (count (:children tree))))
+    (is (= :p (:tag p1)))
+    (is (= ["before"] (:children p1)))
+    (is (= :p (:tag p2)))
+    (is (= ["after"] (:children p2)))))
+
+(deftest unterminated-comment-still-consumes-to-end-of-document
+  ;; The fix must not accidentally make an EVERY comment terminate early --
+  ;; a genuinely unterminated comment (no closing `-->` anywhere) still
+  ;; correctly consumes to end-of-input, matching real HTML5 behavior and
+  ;; this file's own pre-existing convention for unterminated constructs.
+  (let [document (html/parse-into-document "<p>before</p><!-- never closes")
+        tree (dom/tree document)]
+    (is (= 1 (count (:children tree)))
+        "no real content can follow an unterminated comment")
+    (is (= :p (:tag (first (:children tree)))))))
+
 (deftest quoted-attribute-value-containing-greater-than-does-not-corrupt-parsing
   ;; The confirmed repro: a literal, UNESCAPED `>` inside a quoted attribute
   ;; value is real, common, valid HTML5 (quoted attribute values are scanned
