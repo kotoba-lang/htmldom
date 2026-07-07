@@ -696,6 +696,22 @@
               (recur (parent-node-id document parent-id))))))))
 
 (defn- initialize-select-state
+  "Real HTML5 selectedness/`.value`, confirmed against real Chrome before
+   touching source (a naive 'disabled never matters' read of the spec
+   text is WRONG -- an initial attempt learned this the hard way): an
+   EXPLICIT `selected` attr wins outright regardless of `disabled` (a
+   `<select>` whose ONLY selected option is `disabled` -- the extremely
+   common `<option value=\"x\" disabled selected>` placeholder-with-a-
+   real-value idiom -- previously reported `.value` as `\"\"` instead of
+   that option's own value, since the old code re-filtered ALL of
+   `selected-ids` down to non-disabled options before computing `:value`,
+   even when an explicit selection existed). But absent any explicit
+   `selected` at all, the DEFAULT falls back to the first NON-disabled
+   option, skipping disabled ones entirely (confirmed live: a disabled
+   first option with no `selected` anywhere defaults to the next,
+   enabled option, not the disabled one) -- and if EVERY option is
+   disabled, nothing is selected at all (`selectedIndex -1`, `value \"\"`
+   in real Chrome), not a fallback to the plain first option regardless."
   [document select-id]
   (let [options (select-option-ids document select-id)
         multiple? (truthy-attr? (get-in document [:nodes select-id :attrs :multiple]))
@@ -704,10 +720,9 @@
         selected-ids (if multiple?
                        (vec selected-options)
                        (if-let [selected-id (or (first selected-options)
-                                                (first options))]
+                                                (first (remove #(option-disabled? document %) options)))]
                          [selected-id]
                          []))
-        first-enabled-selected (first (remove #(option-disabled? document %) selected-ids))
         document (reduce (fn [document option-id]
                            (let [selected? (boolean (some #{option-id} selected-ids))]
                              (-> document
@@ -716,8 +731,8 @@
                          document
                          options)]
     (dom/set-attribute document select-id :value
-                       (if first-enabled-selected
-                         (option-value document first-enabled-selected)
+                       (if-let [selected-id (first selected-ids)]
+                         (option-value document selected-id)
                          ""))))
 
 (defn- initialize-form-node

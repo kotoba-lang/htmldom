@@ -222,6 +222,51 @@
         select (dom/node document (first (:children root)))]
     (is (= "b" (get-in select [:attrs :value])))))
 
+(deftest select-value-reflects-a-disabled-but-explicitly-selected-option
+  ;; Real HTML5 (confirmed against real Chrome before touching source):
+  ;; disabled on an <option> only blocks USER interaction, it does not
+  ;; affect selectedness/.value -- an explicit selected attr wins outright
+  ;; even when that option is disabled (the extremely common
+  ;; <option value="x" disabled selected> placeholder-with-a-real-value
+  ;; idiom). Previously re-filtered the selected option out entirely
+  ;; whenever it was disabled, reporting "" instead of its own value.
+  (let [document (html/parse-into-document
+                  "<select><option value=\"x\" disabled selected>X</option><option value=\"y\">Y</option></select>")
+        root (dom/node document (:root document))
+        select (dom/node document (first (:children root)))]
+    (is (= "x" (get-in select [:attrs :value])))))
+
+(deftest select-value-with-no-explicit-selection-skips-a-disabled-first-option
+  ;; A naive "disabled never matters for selectedness" fix would ALSO be
+  ;; wrong here: confirmed against real Chrome that the DEFAULT selection
+  ;; (no option explicitly selected) correctly skips a disabled first
+  ;; option and lands on the next, enabled one -- this behavior is
+  ;; unaffected by (and predates) the fix above.
+  (let [document (html/parse-into-document
+                  "<select><option value=\"x\" disabled>X</option><option value=\"y\">Y</option></select>")
+        root (dom/node document (:root document))
+        select (dom/node document (first (:children root)))]
+    (is (= "y" (get-in select [:attrs :value])))))
+
+(deftest select-value-with-every-option-disabled-and-none-selected-is-blank
+  ;; Confirmed against real Chrome: an all-disabled select with nothing
+  ;; explicitly selected selects NOTHING at all (real selectedIndex -1),
+  ;; not a fallback to the plain first option regardless of disabled.
+  (let [document (html/parse-into-document
+                  "<select><option value=\"x\" disabled>X</option><option value=\"y\" disabled>Y</option></select>")
+        root (dom/node document (:root document))
+        select (dom/node document (first (:children root)))]
+    (is (= "" (get-in select [:attrs :value])))))
+
+(deftest select-value-explicit-selected-disabled-option-wins-even-when-not-first
+  (let [document (html/parse-into-document
+                  (str "<select><option value=\"a\">A</option>"
+                       "<option value=\"x\" disabled selected>X</option>"
+                       "<option value=\"y\">Y</option></select>"))
+        root (dom/node document (:root document))
+        select (dom/node document (first (:children root)))]
+    (is (= "x" (get-in select [:attrs :value])))))
+
 (deftest script-content-is-raw-text-not-markup
   ;; A `<script>` body containing `<`/`>`/quotes must not be interpreted as
   ;; markup: the browser scans it literally up to the real `</script>`.
