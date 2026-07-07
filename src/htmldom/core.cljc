@@ -770,16 +770,12 @@
              <optgroup>) close an <option>, which end-of-parent is likewise
              covered for free by the `:end` case; a following <optgroup> is
              out of scope.
-     :p      a new <p> closes a currently open <p>. Real HTML5's actual <p>
-             rule is much broader (a specific list of ~30 block-level
-             elements -- <div>, <ul>, <h1>, etc. -- also implicitly close an
-             open <p>, not just another <p>). That fuller rule is
-             deliberately OUT OF SCOPE here: this engine only auto-closes an
-             open <p> when another <p> starts, which is the single most
-             common real-world case (`<p>one<p>two`). A <p> immediately
-             followed by an unrelated block element still (wrongly, but
-             boundedly, and no worse than before this table existed) nests
-             under this parser.
+     :p      the real HTML5 rule: a <p>'s end tag may be omitted \"if the p
+             element is immediately followed by an address, article, aside,
+             blockquote, details, div, dl, fieldset, figcaption, figure,
+             footer, form, h1, h2, h3, h4, h5, h6, header, hgroup, hr, main,
+             menu, nav, ol, p, pre, section, table, or ul element\" -- the
+             full ~29-element block-level list, not just another <p>.
      :dt/:dd definition-list items CROSS-close each other, unlike the
              same-tag-only entries above. Real HTML5: a <dt>'s end tag \"may
              be omitted if the dt element is immediately followed by another
@@ -854,7 +850,9 @@
    how many cascading pops preceded it."
   {:li #{:li}
    :option #{:option}
-   :p #{:p}
+   :p #{:address :article :aside :blockquote :details :div :dl :fieldset
+        :figcaption :figure :footer :form :h1 :h2 :h3 :h4 :h5 :h6 :header
+        :hgroup :hr :main :menu :nav :ol :p :pre :section :table :ul}
    :dt #{:dt :dd}
    :dd #{:dt :dd}
    :tr #{:tr}

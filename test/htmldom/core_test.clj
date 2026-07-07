@@ -707,12 +707,9 @@
     (is (= "A" (get-in select [:attrs :value])))))
 
 (deftest p-auto-closing-closes-open-p-when-new-p-starts
-  ;; The scoped <p> rule this parser implements: a new <p> closes a
-  ;; currently open <p>, so `<p>one<p>two` produces two SIBLING <p>s, not
-  ;; "two" nested inside "one". (Real HTML5's fuller <p> rule -- where many
-  ;; other block-level start tags, e.g. <div>/<ul>, also close an open <p>
-  ;; -- is deliberately out of scope; see `auto-close-tags`'s docstring in
-  ;; htmldom.core and the next test for that documented limitation.)
+  ;; The <p> rule this parser implements: a new <p> closes a currently open
+  ;; <p>, so `<p>one<p>two` produces two SIBLING <p>s, not "two" nested
+  ;; inside "one".
   (let [document (html/parse-into-document "<div><p>one<p>two</div>")
         tree (dom/tree document)
         div (first (:children tree))
@@ -721,24 +718,43 @@
     (is (= :p (:tag p1))) (is (= ["one"] (:children p1)))
     (is (= :p (:tag p2))) (is (= ["two"] (:children p2)))))
 
-(deftest p-auto-closing-scope-limitation-a-following-block-element-still-nests
-  ;; Documented limitation (see `auto-close-tags`'s docstring in
-  ;; htmldom.core): this engine only auto-closes an open <p> when another
-  ;; <p> starts, not the full real-HTML5 list of block-level elements that
-  ;; also close an open <p>. A <div> immediately following an unclosed <p>
-  ;; still (wrongly, but boundedly, and no worse than before this feature
-  ;; existed) nests under this parser rather than becoming <p>'s sibling.
-  ;; This test pins down the deliberate cut so a future change to it is a
-  ;; conscious decision, not an accidental regression.
-  (let [document (html/parse-into-document "<p>one<div>two</div>")
+(deftest p-auto-closing-closes-open-p-when-a-block-level-sibling-starts
+  ;; Real HTML5's full <p> rule: an open <p>'s end tag may be omitted when
+  ;; immediately followed by any of a specific ~29-element block-level
+  ;; list (see `auto-close-tags`'s docstring in htmldom.core), not just
+  ;; another <p>. Each of these must become <p>'s SIBLING, not nest inside
+  ;; it -- sampling across the list rather than exhaustively enumerating
+  ;; all ~29 entries.
+  (doseq [[tag html] [[:div "<p>one<div>two</div>"]
+                      [:ul "<p>one<ul><li>two</li></ul>"]
+                      [:h1 "<p>one<h1>two</h1>"]
+                      [:table "<p>one<table></table>"]
+                      [:hr "<p>one<hr>"]
+                      [:section "<p>one<section>two</section>"]
+                      [:blockquote "<p>one<blockquote>two</blockquote>"]
+                      [:form "<p>one<form></form>"]]]
+    (let [document (html/parse-into-document html)
+          tree (dom/tree document)
+          [p sibling] (:children tree)]
+      (is (= 2 (count (:children tree))) (str tag " must close the open <p>"))
+      (is (= :p (:tag p)) (str tag " case"))
+      (is (= ["one"] (:children p)) (str tag " case"))
+      (is (= tag (:tag sibling)) (str tag " must be <p>'s sibling, not its child")))))
+
+(deftest p-auto-closing-does-not-trigger-for-inline-elements
+  ;; The block-level list is specific -- an INLINE element (e.g. <span>)
+  ;; immediately following an open <p> is not in it, so it still nests
+  ;; inside the <p> exactly as real HTML5 requires (only the closing list
+  ;; of block-level elements gets the implicit close).
+  (let [document (html/parse-into-document "<p>one<span>two</span></p>")
         tree (dom/tree document)
         p (first (:children tree))
-        [text div] (:children p)]
+        [text span] (:children p)]
     (is (= 1 (count (:children tree))))
     (is (= :p (:tag p)))
     (is (= "one" text))
-    (is (= :div (:tag div)))
-    (is (= ["two"] (:children div)))))
+    (is (= :span (:tag span)))
+    (is (= ["two"] (:children span)))))
 
 (deftest explicit-p-closing-tag-still-works-without-auto-close
   ;; No-regression check for <p>, mirroring the <li> one above.
