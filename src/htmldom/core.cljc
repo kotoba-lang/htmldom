@@ -986,11 +986,32 @@
              (see the `:end` case below, and `find-top-match-index`). Only
              the \"immediately followed by another li\" half needs this
              table.
-     :option a new <option> closes a currently open <option>. Same shape as
-             <li>: the spec also lets end-of-parent (or a following
-             <optgroup>) close an <option>, which end-of-parent is likewise
-             covered for free by the `:end` case; a following <optgroup> is
-             out of scope.
+     :option a new <option> OR a new <optgroup> closes a currently open
+             <option>. Real HTML5: an <option>'s end tag \"may be omitted
+             if the option element is immediately followed by another
+             option element, or if it is immediately followed by an
+             optgroup element, or if there is no more content in its
+             parent element\" -- the \"no more content in parent\" half is
+             likewise covered for free by the `:end` case; only the two
+             \"immediately followed by\" halves need this table.
+     :optgroup a new <optgroup> closes a currently open <optgroup>. Real
+             HTML5: an <optgroup>'s end tag \"may be omitted if the
+             optgroup element is immediately followed by another optgroup
+             element, or if there is no more content in the parent
+             element\" -- same shape as <li>/<tr>, \"no more content\"
+             covered for free. Combined with :option's own entry above,
+             this is the SAME two-level cascading pattern as :td/:th->:tr
+             below: a new <optgroup> first closes a currently open
+             <option> (exposing the enclosing <optgroup> as the new stack
+             top), then that SAME incoming <optgroup> tag is re-examined
+             against the now-exposed <optgroup>'s own entry, closing that
+             too -- so a grouped <select> with no explicit </option>/
+             </optgroup> anywhere (the single most common way authors
+             write <optgroup>, and a genuinely severe gap before this
+             entry existed: every subsequent <optgroup> nested inside the
+             previous option instead of becoming its sibling, confirmed
+             by direct reproduction before this fix) gets the correct,
+             flat sibling tree shape.
      :p      the real HTML5 rule: a <p>'s end tag may be omitted \"if the p
              element is immediately followed by an address, article, aside,
              blockquote, details, div, dl, fieldset, figcaption, figure,
@@ -1070,7 +1091,8 @@
    the moment the nested <table> is exposed as the new top, regardless of
    how many cascading pops preceded it."
   {:li #{:li}
-   :option #{:option}
+   :option #{:option :optgroup}
+   :optgroup #{:optgroup}
    :p #{:address :article :aside :blockquote :details :div :dl :fieldset
         :figcaption :figure :footer :form :h1 :h2 :h3 :h4 :h5 :h6 :header
         :hgroup :hr :main :menu :nav :ol :p :pre :section :table :ul}

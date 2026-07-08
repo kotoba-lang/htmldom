@@ -907,6 +907,63 @@
         select (dom/node document (first (:children root)))]
     (is (= "A" (get-in select [:attrs :value])))))
 
+;; ---- <optgroup> auto-closing -- previously entirely out of scope (this
+;; file's own auto-close-tags docstring explicitly flagged it: "a
+;; following <optgroup> is out of scope"). A grouped <select> with no
+;; explicit </option>/</optgroup> anywhere (the single most common way
+;; authors write <optgroup>) corrupted its tree shape: every subsequent
+;; <optgroup> nested inside the still-open previous <option> instead of
+;; becoming a sibling of the previous <optgroup>. Confirmed via direct
+;; REPL reproduction before this fix. ----
+
+(deftest optgroup-auto-closing-produces-siblings-not-nesting
+  (let [document (html/parse-into-document
+                  "<select><optgroup label=\"A\"><option>1<optgroup label=\"B\"><option>2</optgroup></select>")
+        tree (dom/tree document)
+        select (first (:children tree))
+        [group-a group-b] (:children select)]
+    (is (= 2 (count (:children select)))
+        "the two <optgroup>s must be siblings of each other under <select>, not nested")
+    (is (= :optgroup (:tag group-a))) (is (= "A" (get-in group-a [:attrs :label])))
+    (is (= :optgroup (:tag group-b))) (is (= "B" (get-in group-b [:attrs :label])))
+    (is (= 1 (count (:children group-a)))
+        "group A's own <option> must not still be holding group B as a nested child")
+    (is (= :option (:tag (first (:children group-a)))))
+    (is (= ["1"] (:children (first (:children group-a)))))
+    (is (= ["2"] (:children (first (:children group-b)))))))
+
+(deftest optgroup-auto-closing-cascades-across-three-groups
+  ;; The same two-level cascade already proven for :td/:th->:tr: a new
+  ;; <optgroup> must first close the open <option> (exposing the
+  ;; enclosing <optgroup> as the new stack top), then that SAME incoming
+  ;; <optgroup> tag closes THAT too, so a real, common chain of several
+  ;; groups in a row still comes out flat.
+  (let [document (html/parse-into-document
+                  (str "<select>"
+                       "<optgroup label=\"A\"><option>1"
+                       "<optgroup label=\"B\"><option>2"
+                       "<optgroup label=\"C\"><option>3"
+                       "</optgroup></select>"))
+        tree (dom/tree document)
+        select (first (:children tree))
+        groups (:children select)]
+    (is (= 3 (count groups)))
+    (is (= ["A" "B" "C"] (mapv #(get-in % [:attrs :label]) groups)))
+    (is (every? #(= 1 (count (:children %))) groups)
+        "each group holds exactly its own one <option>, no cross-nesting")))
+
+(deftest optgroup-auto-closing-does-not-affect-a-lone-explicitly-closed-group
+  ;; Regression guard: a single <optgroup> with a real, explicit closing
+  ;; tag (the ordinary, fully-explicit authoring shape) must keep
+  ;; producing the same correct structure regardless of the new entries.
+  (let [document (html/parse-into-document
+                  "<select><optgroup label=\"Only\"><option>1</option></optgroup></select>")
+        tree (dom/tree document)
+        select (first (:children tree))]
+    (is (= 1 (count (:children select))))
+    (is (= :optgroup (:tag (first (:children select)))))
+    (is (= 1 (count (:children (first (:children select))))))))
+
 (deftest p-auto-closing-closes-open-p-when-new-p-starts
   ;; The <p> rule this parser implements: a new <p> closes a currently open
   ;; <p>, so `<p>one<p>two` produces two SIBLING <p>s, not "two" nested
