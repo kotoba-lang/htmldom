@@ -556,7 +556,26 @@
               [(keyword (str/lower-case k))
                (if-let [v (or dq sq bare)]
                  (decode-entities v)
-                 true)]))
+                 ;; Real WHATWG HTML tokenization: a valueless/bare
+                 ;; attribute (`<input checked>`, no `=value` at all) has
+                 ;; its value set to the empty string "" -- that's what
+                 ;; Element.getAttribute() is spec-required to return.
+                 ;; Previously this stored the Clojure boolean `true`
+                 ;; instead, which survives UNMODIFIED all the way out to
+                 ;; real page JS through dom-gpu's set-attribute (verbatim
+                 ;; assoc) and browser's quickjs_wasm.cljc snapshot/
+                 ;; JSON.stringify bridge, so
+                 ;; `getAttribute('checked')` returned the literal string
+                 ;; "true" instead of "" -- confirmed via direct REPL
+                 ;; reproduction before touching source. Every
+                 ;; `truthy-attr?` copy in this codebase (htmldom.core,
+                 ;; browser/document_input.cljc, cssom/core.cljc) already
+                 ;; has an explicit `(= "" v)` case alongside `(= true
+                 ;; v)`, confirming "" was already the intended/expected
+                 ;; internal representation everywhere this value is
+                 ;; actually consumed -- `true` was simply never the
+                 ;; correct value to produce here in the first place.
+                 "")]))
        ;; Real HTML5 tokenization: the FIRST occurrence of a duplicate
        ;; attribute wins and every later one is a parse error, dropped --
        ;; `into {}` would instead let the LAST occurrence silently

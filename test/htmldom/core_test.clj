@@ -449,10 +449,48 @@
     (is (= "1" (get-in div [:attrs :data-x])))))
 
 (deftest duplicate-boolean-attribute-keeps-the-first-bare-form
+  ;; The bare form's value is the spec-mandated "" (see attrs' own
+  ;; docstring for why "true" would be wrong) -- this test is really
+  ;; about "first duplicate wins," not boolean-attribute value
+  ;; semantics, so it's updated alongside that fix rather than left
+  ;; pinning the old, incorrect value.
   (let [document (html/parse-into-document "<input disabled disabled=\"disabled\">")
         tree (dom/tree document)
         input (first (:children tree))]
-    (is (= true (get-in input [:attrs :disabled])))))
+    (is (= "" (get-in input [:attrs :disabled])))))
+
+;; ---- valueless/bare boolean attributes now store the spec-mandated ""
+;; instead of the Clojure boolean `true` (previously stored verbatim,
+;; surviving unmodified out to real page JS as the literal string "true"
+;; via getAttribute() -- confirmed via direct REPL reproduction before
+;; touching source) ----
+
+(deftest bare-boolean-attribute-value-is-the-empty-string-not-clojure-true
+  (let [document (html/parse-into-document "<input checked>")
+        tree (dom/tree document)
+        input (first (:children tree))]
+    (is (= "" (get-in input [:attrs :checked])))))
+
+(deftest multiple-bare-boolean-attributes-on-the-same-element-are-all-empty-strings
+  (let [document (html/parse-into-document "<option selected disabled>")
+        tree (dom/tree document)
+        option (first (:children tree))]
+    (is (= "" (get-in option [:attrs :selected])))
+    (is (= "" (get-in option [:attrs :disabled])))))
+
+(deftest a-quoted-attribute-value-is-unaffected-by-the-bare-attribute-fix
+  (let [document (html/parse-into-document "<input value=\"hello\">")
+        tree (dom/tree document)
+        input (first (:children tree))]
+    (is (= "hello" (get-in input [:attrs :value])))))
+
+(deftest an-explicit-empty-string-attribute-value-behaves-identically-to-a-bare-one
+  ;; Real HTML5: `disabled` and `disabled=""` are the exact same thing --
+  ;; this fix makes both forms produce byte-identical internal values.
+  (let [document (html/parse-into-document "<input disabled=\"\">")
+        tree (dom/tree document)
+        input (first (:children tree))]
+    (is (= "" (get-in input [:attrs :disabled])))))
 
 (deftest duplicate-attribute-case-insensitive-key-still-keeps-the-first
   ;; Real HTML attribute names are case-insensitive, and this parser
