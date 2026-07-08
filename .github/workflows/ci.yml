@@ -61,3 +61,6 @@ jobs:
 
       - name: Run tests
         run: clojure -M:test
+
+      - name: Lint
+        run: clojure -M:lint
