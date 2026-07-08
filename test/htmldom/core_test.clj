@@ -658,6 +658,16 @@
     (is (= [(str (char 0x81) (char 0x8D) (char 0x8F) (char 0x90) (char 0x9D))]
            (:children p)))))
 
+(deftest numeric-entities-naming-surrogates-or-out-of-range-codepoints-stay-unchanged
+  ;; A numeric reference naming a UTF-16 surrogate codepoint (0xD800-0xDFFF,
+  ;; never a valid scalar value on its own) or a codepoint beyond Unicode's
+  ;; max (0x10FFFF) fails numeric-char-ref->str's validity guard and falls
+  ;; back to literal unmodified text, same as an unrecognized named entity.
+  (let [document (html/parse-into-document "<p>&#xD800;&#xDFFF;&#1114112;</p>")
+        tree (dom/tree document)
+        p (first (:children tree))]
+    (is (= ["&#xD800;&#xDFFF;&#1114112;"] (:children p)))))
+
 (deftest pragmatic-named-entity-subset-decodes-correctly
   (let [document (html/parse-into-document
                   "<p>&nbsp;&copy;&reg;&trade;&mdash;&ndash;&hellip;</p>")
