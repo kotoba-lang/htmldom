@@ -808,6 +808,64 @@
     (is (= "btn" (get-in a [:attrs :class])))
     (is (= ["link"] (:children a)))))
 
+;; ---- unquoted attribute value ENDING in a trailing slash right before
+;; the tag's own '>' -- distinct from the slash-in-the-middle case above ----
+;;
+;; Real bug this guards: `token` unconditionally stripped a trailing `/`
+;; from the whole tag body before splitting into tag/attribute text, on
+;; the theory that it's always an optional self-closing marker. But per
+;; real HTML5 tokenization, `/` has no special meaning at all inside an
+;; UNQUOTED attribute value -- it is only a self-closing marker in the
+;; tag-name/before-attribute-name/attribute-name/after-quoted-value
+;; states. When an unquoted attribute's value legitimately ends in `/`
+;; right before `>` (extremely common for URLs, e.g.
+;; href=http://example.com/), this silently truncated the value by one
+;; character. Confirmed via direct REPL reproduction before touching
+;; source.
+
+(deftest unquoted-attribute-value-ending-in-slash-keeps-the-slash
+  (let [document (html/parse-into-document
+                  "<a href=http://example.com/>link</a>")
+        tree (dom/tree document)
+        a (first (:children tree))]
+    (is (= "http://example.com/" (get-in a [:attrs :href]))
+        "the trailing / is real URL content, not a self-closing marker -- it must not be dropped")))
+
+(deftest unquoted-attribute-value-ending-in-slash-on-a-void-element-keeps-the-slash
+  (let [document (html/parse-into-document
+                  "<main><img src=http://example.com/img/></main>")
+        tree (dom/tree document)
+        main (first (:children tree))
+        img (first (:children main))]
+    (is (= :img (:tag img)))
+    (is (= "http://example.com/img/" (get-in img [:attrs :src]))
+        "same bug, but on a genuinely void element -- self-closing status (from void-tag membership) must be unaffected by keeping the trailing slash")))
+
+(deftest genuine-self-closing-slash-after-a-quoted-value-is-still-stripped
+  ;; Regression guard: this fix must not stop stripping the self-closing
+  ;; marker in the cases that were already correct -- right after a
+  ;; CLOSING quote (with or without a space before the /), the trailing
+  ;; slash is genuinely a self-closing marker and must still be dropped
+  ;; from the attribute text (not leak in as a stray attribute).
+  (let [document (html/parse-into-document "<main><input value=\"ok\"/></main>")
+        tree (dom/tree document)
+        main (first (:children tree))
+        input (first (:children main))]
+    (is (= "ok" (get-in input [:attrs :value]))
+        "the self-closing / directly after the closing quote must still be stripped, not appended to the value")))
+
+(deftest genuine-self-closing-slash-with-no-attributes-is-still-stripped
+  ;; Regression guard mirroring void-element-with-trailing-slash-still-
+  ;; self-closes above, but through THIS fix's own new code path (the
+  ;; unquoted-value-tail? scan on an empty/whitespace-free body).
+  (let [document (html/parse-into-document "<main><br/>tail</main>")
+        tree (dom/tree document)
+        main (first (:children tree))
+        [br tail] (:children main)]
+    (is (= :br (:tag br)))
+    (is (= [] (:children br)))
+    (is (= "tail" tail))))
+
 (deftest tokenize-mixed-recognized-and-unrecognized-entities
   ;; Exercises htmldom.core/tokenize directly (rather than through
   ;; parse-into-document): an XML entity (&amp;), a numeric decimal

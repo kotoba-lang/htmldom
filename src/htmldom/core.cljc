@@ -583,22 +583,63 @@
        ;; newest value.
        (reduce (fn [acc [k v]] (if (contains? acc k) acc (assoc acc k v))) {})))
 
+(defn- unquoted-value-tail?
+  "True if the end of `s` (tag name + attribute text, no wrapping <, >, or
+   leading '/') is inside an in-progress UNQUOTED attribute value -- i.e.
+   per real HTML5 tokenization, a trailing '/' at this position is
+   literal value content, not a self-closing marker. `/` is ONLY a
+   self-closing marker while in the tag-name, before-attribute-name,
+   attribute-name, or after-attribute-value-quoted states; inside an
+   unquoted value it has no special meaning at all and is simply
+   appended, exactly like any other character, until whitespace or the
+   tag's own '>' ends the value. Scans left-to-right with the same
+   quote-tracking shape as tag-close-index above: whitespace always
+   exits value/after-= position (back to \"before attribute name\"); a
+   quote right after '=' opens a quoted value (its own contents are
+   never \"unquoted\"); any other character right after '=' begins an
+   unquoted value that continues until the next whitespace/quote/=."
+  [s]
+  (let [len (count s)]
+    (loop [pos 0 quote nil after-eq? false unquoted? false]
+      (if (>= pos len)
+        unquoted?
+        (let [c (subs s pos (inc pos))]
+          (cond
+            quote (recur (inc pos) (when-not (= c quote) quote) false false)
+            (re-matches #"[ \t\n\r]" c) (recur (inc pos) nil false false)
+            (= c "=") (recur (inc pos) nil true false)
+            (and after-eq? (or (= c "\"") (= c "'"))) (recur (inc pos) c false false)
+            after-eq? (recur (inc pos) nil false true)
+            unquoted? (recur (inc pos) nil false true)
+            :else (recur (inc pos) nil false false)))))))
+
 (defn- token
   [raw]
   (if (str/starts-with? raw "<")
     (let [body (subs raw 1 (dec (count raw)))
           closing? (str/starts-with? body "/")
           body (str/trim (if closing? (subs body 1) body))
-          ;; A trailing `/` right before the tag's `>` is always stripped from
-          ;; the tag/attribute text (matching real HTML5, which ignores a
-          ;; stray trailing slash on any start tag) -- but this must happen
-          ;; BEFORE the tag name is extracted, and self-closing status is
-          ;; determined SOLELY by void-tag membership, not by the presence of
-          ;; this slash: real HTML5 only treats actual void elements
-          ;; (`<br/>`, `<img/>`, ...) as self-closing. A trailing `/` on an
-          ;; ordinary element like `<div/>` is ignored -- the element still
-          ;; needs, and will be matched against, a real closing tag later.
-          body (str/trim (if (str/ends-with? body "/") (subs body 0 (dec (count body))) body))
+          ;; A trailing `/` right before the tag's `>` is stripped from the
+          ;; tag/attribute text (matching real HTML5, which ignores a stray
+          ;; trailing slash on any start tag) -- but ONLY when it is genuinely
+          ;; a self-closing marker, not when it directly continues an
+          ;; UNQUOTED attribute value that happens to end right at the `>`
+          ;; (a real, common pattern for URLs, e.g. `href=http://example.com/`
+          ;; or `src=http://example.com/img/`). Per real HTML5 tokenization,
+          ;; `/` has no special meaning inside an unquoted value at all --
+          ;; unconditionally stripping it here silently truncated the value
+          ;; by one character, confirmed via direct REPL reproduction before
+          ;; this fix. This must happen BEFORE the tag name is extracted, and
+          ;; self-closing status is determined SOLELY by void-tag membership,
+          ;; not by the presence of this slash: real HTML5 only treats actual
+          ;; void elements (`<br/>`, `<img/>`, ...) as self-closing. A
+          ;; trailing `/` on an ordinary element like `<div/>` is ignored --
+          ;; the element still needs, and will be matched against, a real
+          ;; closing tag later.
+          body (str/trim (if (and (str/ends-with? body "/")
+                                   (not (unquoted-value-tail? (subs body 0 (dec (count body))))))
+                            (subs body 0 (dec (count body)))
+                            body))
           [tag attr-text] (str/split body #"\s+" 2)
           tag (str/lower-case (or tag ""))
           self? (contains? void-tags tag)]
