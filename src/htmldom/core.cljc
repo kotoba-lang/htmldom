@@ -1210,12 +1210,165 @@
   (or (contains? raw-text-tags (name (get-in document [:nodes (peek stack) :tag])))
       (some #(= :pre (get-in document [:nodes % :tag])) stack)))
 
+;; ============================================================
+;; Active formatting elements + adoption agency (WHATWG §13.2.4.3, §13.2.6.4.7)
+;;
+;; L2: the real WHATWG algorithms for mis-nested formatting elements, layered
+;; on the existing subset tokenizer + auto-closing tree builder. They operate
+;; within the engine's :document-root document model -- NO html/head/body
+;; synthesis (that is an L3 architectural change requiring downstream
+;; coordination in cssom/layout/dom-bridge, which all assume content nests
+;; directly under :document). They activate only on mis-nested input;
+;; well-formed HTML parses byte-identically to before, so the existing 133-
+;; test suite is a regression gate.
+;;
+;; In scope (L2): the list of active formatting elements with the Noah's Ark
+;; clause; reconstruct active formatting elements; the adoption agency
+;; algorithm's no-furthest-block path (steps 1-8 + the any-other-end-tag
+;; fallback), which correctly handles the common mis-nested formatting shapes
+;; real browsers fix (<b>p<i>s</b>e</i> -> <b>p<i>s</i></b><i>e</i>;
+;; <b>x<i>y</b>z -> <b>x<i>y</i></b><i>z</i>; <div><b>x</div>y reopens b).
+;;
+;; Deliberately deferred to L3 (documented honest cuts, same convention as
+;; `auto-close-tags`): the adoption agency's furthest-block reparenting path
+;; (steps 9-19 -- rare block-in-inline like <b><p>x</b>, falls back to naive
+;; nesting here, no crash); foster parenting (in-table); the full 23-mode
+;; insertion-mode state machine; html/head/body synthesis; template/select/
+;; frameset modes; scope markers (cells are not real insertion modes yet, so
+;; formatting may leak across table cells); the `a`/`nobr` in-scope special
+;; cases; "generate implied end tags" for the any-other-end-tag path.
+
+(def ^:private formatting-tags
+  "WHATWG §13.2.4.2 'Formatting' category -- start tags that push onto the
+  list of active formatting elements; end tags that run the adoption agency
+  algorithm."
+  #{:a :b :big :code :em :font :i :nobr :s :small :strike :strong :tt :u})
+
+(def ^:private scope-tags
+  "Default scope boundaries (WHATWG §13.2.4.2 'has an element in scope'), HTML
+  namespace only. The :document root (stack index 0) acts as the scope ceiling
+  in lieu of an html element."
+  #{:applet :caption :html :table :td :th :marquee :object :select :template})
+
+(defn- tag-of [document id] (get-in document [:nodes id :tag]))
+
+(defn- push-afe
+  "Push `id` onto the afe list with the Noah's Ark clause (WHATWG §13.2.4.3):
+  if there are already three entries with the same tag, remove the earliest
+  before adding. (No markers in L2 -- see namespace commentary -- so the
+  whole list is one segment.)"
+  [document afe id]
+  (let [tag (tag-of document id)
+        same-tag (filter #(= (tag-of document %) tag) afe)]
+    (if (>= (count same-tag) 3)
+      (conj (vec (remove #(= % (first same-tag)) afe)) id)
+      (conj afe id))))
+
+(defn- in-scope?
+  "WHATWG 'has an element in scope' (default scope): scan the stack from the
+  current node (top) toward the root; match if `target-tag` is found before
+  any scope boundary. The :document root (index 0) is the scope ceiling."
+  [document stack target-tag]
+  (loop [i (dec (count stack))]
+    (when (>= i 0)
+      (let [t (tag-of document (nth stack i))]
+        (cond
+          (= t target-tag) true
+          (= i 0) false
+          (contains? scope-tags t) false
+          :else (recur (dec i)))))))
+
+(defn- insert-element-for-token
+  "Create a new element with `src-id`'s tag and attrs ('an element for the
+  token for which src-id was created'), append it to `parent-id`, return
+  [new-id document]. Used by reconstruct-active-formatting."
+  [document parent-id src-id]
+  (let [tag (tag-of document src-id)
+        [new-id document] (dom/create-element document tag)
+        document (dom/append-child document parent-id new-id)
+        document (apply-attrs document new-id (get-in document [:nodes src-id :attrs]))]
+    [new-id document]))
+
+(defn- reconstruct-active-formatting
+  "WHATWG §13.2.4.3. Reopens formatting elements that are in the afe list but
+  no longer on the stack of open elements (they were implicitly closed by an
+  end tag for an ancestor), so subsequent text/elements inherit the active
+  formatting. No-op when the list is empty or the last entry is already on
+  the stack. Returns [document stack afe]."
+  [document stack afe]
+  (let [v (vec afe)
+        n (count v)]
+    (if (or (zero? n)
+            (some #(= % (peek v)) stack))
+      [document stack afe]
+      (let [in-stack? (fn [e] (some #(= % e) stack))
+            ;; rewind: largest index < n-1 whose entry is in the stack; entries
+            ;; after it need reconstruction. -1 if none (reconstruct from 0).
+            boundary (loop [i (- n 2)]
+                       (cond
+                         (< i 0) -1
+                         (in-stack? (nth v i)) i
+                         :else (recur (dec i))))
+            from (inc boundary)]
+        (loop [document document stack stack v v i from]
+          (if (>= i n)
+            [document stack v]
+            (let [old-id (nth v i)
+                  [new-id document] (insert-element-for-token document (peek stack) old-id)]
+              (recur document (conj stack new-id) (assoc v i new-id) (inc i)))))))))
+
+(defn- adoption-agency
+  "WHATWG §13.2.6.4.7 adoption agency algorithm for an end tag whose tag name
+  is `subject` (a formatting element). Handles mis-nested formatting.
+
+  L2 implements steps 1-8 (the no-furthest-block path) + the any-other-end-tag
+  fallback (step 4.3): this correctly handles every case where no special
+  (block) element sits between the formatting element and the current node --
+  i.e. the common real-world mis-nesting. When a furthest block IS present
+  (rare block-in-inline like <b><p>x</b>), L2 falls back to the no-furthest-
+  block behavior (pop to the formatting element, remove it from the afe list)
+  rather than the full reparenting path (steps 9-19, deferred to L3): the
+  result is naive L1 nesting for that rare shape, never a crash. (The full
+  AAA's 8-iteration outer loop is unnecessary here because both L2 paths
+  return after a single pass; it returns with the reparenting path at L3.)
+  Returns [document stack afe]."
+  [document stack afe subject]
+  (let [stack (vec stack)
+        afe (vec afe)
+        current (peek stack)]
+    (if (and (= (tag-of document current) subject)
+             (not (some #(= % current) afe)))
+      ;; step 2: current node is subject and not in afe -> pop, return.
+      [document (pop stack) afe]
+      (let [;; step 4.3: formattingElement = last afe entry with tag subject
+            fmt (last (filter #(= (tag-of document %) subject) afe))]
+        (if (nil? fmt)
+          ;; no formatting element -> any-other-end-tag: pop to subject.
+          (let [match-idx (find-top-match-index document stack subject)]
+            [document (if match-idx (subvec stack 0 match-idx) stack) afe])
+          (let [fmt-idx (.indexOf stack fmt)]
+            (cond
+              ;; step 4: fmt not in stack -> remove from afe, return.
+              (neg? fmt-idx)
+              [document stack (vec (remove #(= % fmt) afe))]
+              ;; step 5: fmt not in scope -> return.
+              (not (in-scope? document stack subject))
+              [document stack afe]
+              ;; L2: step 7's furthestBlock search + step 8 (no furthest block)
+              ;; and the furthest-block fallback (full reparenting steps 9-19,
+              ;; deferred to L3) all collapse to the same action here -- pop to
+              ;; fmt and remove fmt from the afe list.
+              :else
+              [document (subvec stack 0 fmt-idx)
+               (vec (remove #(= % fmt) afe))])))))))
+
 (defn parse-into-document
   [html]
   (let [[root-id document] (dom/create-element dom/empty-document :document)
         document (dom/set-root document root-id)]
     (loop [document document
            stack [root-id]
+           afe []
            tokens (seq (tokenize html))]
       (if-let [{:keys [type tag attrs self? text]} (first tokens)]
         (case type
@@ -1223,8 +1376,9 @@
           (let [text (if (preserve-whitespace-context? document stack)
                        text
                        (str/replace text #"\s+" " "))
+                [document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-text-node document text)]
-            (recur (dom/append-child document (peek stack) id) stack (next tokens)))
+            (recur (dom/append-child document (peek stack) id) stack afe (next tokens)))
 
           :start
           (let [tag-kw (keyword tag)
@@ -1238,10 +1392,17 @@
                 ;; closing an open <td> then also the enclosing <tr>).
                 stack (auto-close-stack document stack tag-kw)
                 [document stack] (maybe-insert-implicit-tbody document stack tag-kw)
+                ;; Reconstruct active formatting elements before inserting any
+                ;; new element (WHATWG in-body), so mis-nested formatting that
+                ;; was implicitly closed reopens around the new element.
+                [document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)
                              (dom/append-child (peek stack) id))
+                afe (if (contains? formatting-tags tag-kw)
+                      (push-afe document afe id)
+                      afe)
                 remaining (next tokens)
                 ;; WHATWG spec: if a <pre>'s content begins with a single
                 ;; U+000A LINE FEED, that one character is silently dropped
@@ -1260,13 +1421,20 @@
                                 (cons (assoc (first remaining) :text stripped) (next remaining))
                                 (next remaining)))
                             remaining)]
-            (recur document (if self? stack (conj stack id)) remaining))
+            (recur document (if self? stack (conj stack id)) afe remaining))
 
           :end
-          (let [match-idx (find-top-match-index document stack (keyword tag))]
-            (recur document
-                   (if match-idx (subvec stack 0 match-idx) stack)
-                   (next tokens)))
+          (let [tag-kw (keyword tag)]
+            (if (contains? formatting-tags tag-kw)
+              ;; Formatting end tag -> adoption agency algorithm.
+              (let [[document stack afe] (adoption-agency document stack afe tag-kw)]
+                (recur document stack afe (next tokens)))
+              ;; Any other end tag -> pop to the nearest matching open element.
+              (let [match-idx (find-top-match-index document stack tag-kw)]
+                (recur document
+                       (if match-idx (subvec stack 0 match-idx) stack)
+                       afe
+                       (next tokens)))))
 
-          (recur document stack (next tokens)))
+          (recur document stack afe (next tokens)))
         (initialize-form-defaults document)))))
