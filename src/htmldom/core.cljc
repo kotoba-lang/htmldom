@@ -514,7 +514,18 @@
    "euro" "\u20AC" "pound" "\u00A3" "yen" "\u00A5" "cent" "\u00A2"
    "shy" "\u00AD" "ensp" "\u2002" "emsp" "\u2003" "thinsp" "\u2009"
    "minus" "\u2212" "ne" "\u2260" "le" "\u2264" "ge" "\u2265"
-   "infin" "\u221E" "asymp" "\u2248" "micro" "\u00B5" "ordm" "\u00BA"})
+   "infin" "\u221E" "asymp" "\u2248" "micro" "\u00B5" "ordm" "\u00BA"
+   ;; A breadcrumb (`Home &rsaquo; Docs &rsaquo; Page`) painted the literal
+   ;; text "&rsaquo;" -- found by kotoba-lang/cssom's conformance corpus the
+   ;; first time it contained one. The angle quotes and the remaining
+   ;; typographic separators complete the page-furniture set.
+   "rsaquo" "\u203A" "lsaquo" "\u2039" "sbquo" "\u201A" "bdquo" "\u201E"
+   "Dagger" "\u2021" "permil" "\u2030" "oline" "\u203E" "frasl" "\u2044"
+   "lowast" "\u2217" "loz" "\u25CA" "spades" "\u2660" "clubs" "\u2663"
+   "hearts" "\u2665" "diams" "\u2666" "not" "\u00AC" "sup1" "\u00B9"
+   "frac14" "\u00BC" "frac34" "\u00BE" "iquest" "\u00BF" "iexcl" "\u00A1"
+   "brvbar" "\u00A6" "uml" "\u00A8" "macr" "\u00AF" "acute" "\u00B4"
+   "cedil" "\u00B8" "curren" "\u00A4" "szlig" "\u00DF"})
 
 (defn- codepoint->str
   "A Unicode codepoint (possibly outside the BMP, e.g. an emoji) as a string,
