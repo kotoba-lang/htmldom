@@ -144,6 +144,39 @@
         (or (parse-calc inner) v)
         v))))
 
+(defn- parse-property-value
+  "parse-style-value, plus the one property whose UNITLESS number is not a
+   length: `line-height`.
+
+   Real CSS reads `line-height: 2` as a ratio of the element's own
+   font-size, and `line-height: 2px` as an absolute length -- but
+   parse-style-value coerces any bare integer to a number, erasing exactly
+   that distinction, so both arrived downstream as the number 2 and
+   cssom.layout's resolve-line-height (which can only read a number as
+   pixels) laid out a TWO-PIXEL line, stacking wrapped lines on top of each
+   other. Confirmed by differential testing against a real browser; the
+   decimal form `line-height: 1.5` was unaffected all along, because a
+   non-integer never matched parse-style-value's coercion in the first
+   place and survived as the string resolve-line-height treats as a
+   multiplier.
+
+   Keeping a unitless integer as a trimmed STRING routes it down that same
+   multiplier branch. `2px` still coerces to 2 and stays absolute.
+
+   This mirrors the identical fix in cssom.core/parse-property-value: an
+   inline `style=\"...\"` attribute is parsed HERE, by this namespace's own
+   independent copy of the declaration parser, and never passes through
+   cssom.core's, so the fix has to exist in both places (see this file's
+   own header comment about that duplication)."
+  [k v]
+  ;; `k` arrives already keywordized from parse-style-declarations, so it
+  ;; has to go through `name` -- `(str :line-height)` is \":line-height\",
+  ;; which would never match and would silently disable this whole branch.
+  (if (and (= "line-height" (str/lower-case (if (keyword? k) (name k) (str k))))
+           (re-matches #"\s*-?\d+\s*" (str v)))
+    (str/trim (str v))
+    (parse-style-value v)))
+
 (def ^:private important-declaration-pattern
   ;; Mirrors cssom.core's own `!important` regex convention exactly (same
   ;; case-insensitivity, same optional-leading-whitespace, same anchor at
@@ -436,7 +469,7 @@
    rule-based declarations -- real CSS's importance/cascade-origin step,
    not just \"don't corrupt the value\")."
   [style-text]
-  (into {} (map (fn [[k v _]] [k (parse-style-value v)])) (parse-style-declarations style-text)))
+  (into {} (map (fn [[k v _]] [k (parse-property-value k v)])) (parse-style-declarations style-text)))
 
 (defn style-importance
   "The set of property keywords whose declaration in `style-text` (a raw
@@ -464,7 +497,24 @@
    unsupported CSS values)."
   {"amp" "&" "lt" "<" "gt" ">" "quot" "\"" "apos" "'"
    "nbsp" "\u00A0" "copy" "\u00A9" "reg" "\u00AE" "trade" "\u2122"
-   "mdash" "\u2014" "ndash" "\u2013" "hellip" "\u2026"})
+   "mdash" "\u2014" "ndash" "\u2013" "hellip" "\u2026"
+   ;; Added after a real page shape in kotoba-lang/cssom's conformance
+   ;; corpus (a footer reading `&copy; 2026 <a>Privacy</a> &middot;
+   ;; <a>Terms</a>`) rendered the literal text "&middot;" on screen: the
+   ;; separator dot, the typographic quotes, the arrows and the primes are
+   ;; the entities that actually appear in ordinary page furniture, and a
+   ;; missing one is not a subtle degradation -- it paints the source text.
+   "middot" "\u00B7" "bull" "\u2022" "dagger" "\u2020" "sect" "\u00A7"
+   "para" "\u00B6" "deg" "\u00B0" "plusmn" "\u00B1" "times" "\u00D7"
+   "divide" "\u00F7" "frac12" "\u00BD" "sup2" "\u00B2" "sup3" "\u00B3"
+   "laquo" "\u00AB" "raquo" "\u00BB" "lsquo" "\u2018" "rsquo" "\u2019"
+   "ldquo" "\u201C" "rdquo" "\u201D" "prime" "\u2032" "Prime" "\u2033"
+   "larr" "\u2190" "uarr" "\u2191" "rarr" "\u2192" "darr" "\u2193"
+   "harr" "\u2194" "check" "\u2713" "cross" "\u2717" "star" "\u2606"
+   "euro" "\u20AC" "pound" "\u00A3" "yen" "\u00A5" "cent" "\u00A2"
+   "shy" "\u00AD" "ensp" "\u2002" "emsp" "\u2003" "thinsp" "\u2009"
+   "minus" "\u2212" "ne" "\u2260" "le" "\u2264" "ge" "\u2265"
+   "infin" "\u221E" "asymp" "\u2248" "micro" "\u00B5" "ordm" "\u00BA"})
 
 (defn- codepoint->str
   "A Unicode codepoint (possibly outside the BMP, e.g. an emoji) as a string,

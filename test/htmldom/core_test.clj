@@ -1,5 +1,6 @@
 (ns htmldom.core-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
@@ -1519,3 +1520,54 @@
         main (dom/node document (first (:children root)))
         div (dom/node document (first (:children main)))]
     (is (= 120 (get-in div [:attrs :style/width])))))
+
+(deftest unitless-line-height-in-an-inline-style-stays-a-ratio
+  ;; Found by kotoba-lang/cssom's differential conformance harness against
+  ;; a real Blink browser: `line-height: 2` was coerced to the NUMBER 2 by
+  ;; the generic integer coercion, which cssom.layout can only read as an
+  ;; absolute 2px, so every wrapped line stacked almost exactly on top of
+  ;; the one before it. Real CSS reads a unitless line-height as a ratio of
+  ;; the element's own font-size.
+  (let [doc (html/parse-into-document "<p style=\"line-height: 2\">x</p>")
+        p (first (filter #(= :p (:tag %)) (vals (:nodes doc))))]
+    (is (= "2" (get-in p [:attrs :style-inline :line-height]))
+        "kept as a string, which is what routes it down cssom.layout's
+         multiplier branch"))
+  (let [doc (html/parse-into-document "<p style=\"line-height: 2px\">x</p>")
+        p (first (filter #(= :p (:tag %)) (vals (:nodes doc))))]
+    (is (= 2 (get-in p [:attrs :style-inline :line-height]))
+        "a real px length still coerces to a number and stays absolute"))
+  (let [doc (html/parse-into-document "<p style=\"line-height: 1.5\">x</p>")
+        p (first (filter #(= :p (:tag %)) (vals (:nodes doc))))]
+    (is (= "1.5" (get-in p [:attrs :style-inline :line-height]))
+        "the decimal form was never affected and is unchanged"))
+  (let [doc (html/parse-into-document "<p style=\"width: 2\">x</p>")
+        p (first (filter #(= :p (:tag %)) (vals (:nodes doc))))]
+    (is (= 2 (get-in p [:attrs :style-inline :width]))
+        "no other property changes: a bare integer still coerces")))
+
+(deftest common-page-furniture-entities-decode
+  ;; `&middot;` between footer links rendered as the literal text
+  ;; "&middot;" -- found by kotoba-lang/cssom's conformance corpus on a
+  ;; real footer shape. A missing named entity here is not a subtle
+  ;; degradation: the source text is painted on screen.
+  (let [doc (html/parse-into-document
+             "<p>&copy; 2026 &middot; &rsquo; &rarr; &euro; &bull;</p>")
+        text (->> (vals (:nodes doc))
+                  (filter #(= :text (:node/type %)))
+                  (map :text)
+                  (str/join ""))]
+    (is (str/includes? text "·"))
+    (is (str/includes? text "’"))
+    (is (str/includes? text "→"))
+    (is (str/includes? text "€"))
+    (is (str/includes? text "•"))
+    (is (not (str/includes? text "&middot;"))
+        "and the source form is gone, not merely accompanied"))
+  (let [doc (html/parse-into-document "<p>&notarealentity;</p>")
+        text (->> (vals (:nodes doc))
+                  (filter #(= :text (:node/type %)))
+                  (map :text)
+                  (str/join ""))]
+    (is (str/includes? text "&notarealentity;")
+        "an unknown entity is still left alone rather than guessed at")))
