@@ -1425,7 +1425,17 @@
           :text
           (let [text (if (preserve-whitespace-context? document stack)
                        text
-                       (str/replace text #"\s+" " "))
+                       ;; Collapse runs of spaces/tabs, but KEEP newlines:
+                       ;; whether a newline is a line break or just another
+                       ;; space is a CSS decision (`white-space: pre-line`
+                       ;; breaks on it, `normal` collapses it), and a parser
+                       ;; cannot see CSS. Destroying newlines here made
+                       ;; `white-space: pre-wrap`/`pre-line` impossible to
+                       ;; implement at all -- the information was gone
+                       ;; before layout ever ran. cssom.layout collapses
+                       ;; them for `normal`/`nowrap`, which is where that
+                       ;; decision belongs.
+                       (str/replace text #"[^\S\n]+" " "))
                 [document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-text-node document text)]
             (recur (dom/append-child document (peek stack) id) stack afe (next tokens)))

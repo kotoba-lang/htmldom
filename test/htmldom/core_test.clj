@@ -1366,15 +1366,20 @@
     (is (= ["b\n  c"] (:children span)))
     (is (= "\nd" text-d))))
 
-(deftest ordinary-elements-still-collapse-whitespace-without-regression
-  ;; No-regression check: moving whitespace collapsing out of the
-  ;; stateless tokenizer and into parse-into-document (where the open-
-  ;; element stack is available to check for a <pre> ancestor) must not
-  ;; change collapsing behavior for ordinary, non-pre content at all.
+(deftest ordinary-elements-collapse-space-runs-but-keep-newlines
+  ;; Space and tab runs collapse here; NEWLINES do not. Whether a newline
+  ;; is a line break or just another space is a CSS decision --
+  ;; `white-space: pre-line` breaks on it, `normal` collapses it -- and a
+  ;; parser cannot see CSS. Collapsing them here made `pre-wrap`/`pre-line`
+  ;; impossible to implement at all, because the information was destroyed
+  ;; before layout ever ran; kotoba-lang/cssom's conformance harness scored
+  ;; both as permanent failures against a real browser. cssom.layout now
+  ;; collapses newlines for `normal`/`nowrap`, which is where the decision
+  ;; belongs.
   (let [document (html/parse-into-document "<p>Hello\n   world  \n  again</p>")
         tree (dom/tree document)
         p (first (:children tree))]
-    (is (= ["Hello world again"] (:children p)))))
+    (is (= ["Hello\n world \n again"] (:children p)))))
 
 (deftest script-and-textarea-content-stay-verbatim-without-regression
   ;; No-regression check, the one genuinely at risk from this fix: moving
