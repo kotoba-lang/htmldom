@@ -718,7 +718,14 @@
     ;; whitespace between tags is dropped the same way regardless of <pre>
     ;; context either way (collapsing an all-whitespace string never changes
     ;; whether it's blank), so this filtering doesn't need to move.
-    (when-not (str/blank? raw)
+    ;; Whitespace-only runs are KEPT. They are the space between inline
+    ;; elements -- `<a>one</a>\n  <a>two</a>` renders as `one two` in every
+    ;; browser, and dropping the run here made the words touch, with no way
+    ;; for layout to recover the gap. Layout is where a whitespace-only text
+    ;; child gets discarded when it would form a stray row of its own
+    ;; between blocks (cssom.layout's inline-runs), because that decision
+    ;; needs the box tree this tokenizer cannot see.
+    (when-not (empty? raw)
       {:type :text :text (decode-entities raw)})))
 
 (def ^:private raw-text-tags
