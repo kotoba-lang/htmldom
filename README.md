@@ -37,5 +37,5 @@ headless Chrome and compares the tree shape, so "trusted subset only" is a
 number rather than a disclaimer. See `conformance/README.md`.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src" conformance/run.cljs
+nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljs
 ```

@@ -37,7 +37,7 @@
        cannot run anything.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src\" conformance/run.cljs \\
+     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/run.cljs \\
        [--browser <path to Chrome/Brave binary>] [--only table/] \\
        [--ledger path/to/ledger.edn] [--verbose]"
   (:require ["node:child_process" :as cp]

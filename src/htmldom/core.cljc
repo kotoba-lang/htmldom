@@ -9,480 +9,88 @@
    HTML text); this namespace goes the other direction: parses HTML text into
    a kotoba.wasm.dom document."
   (:require [clojure.string :as str]
+            [cssom.core :as css]
             [kotoba.wasm.dom :as dom]))
 
 (def void-tags
   #{"area" "base" "br" "col" "embed" "hr" "img" "input" "link" "meta"
     "param" "source" "track" "wbr"})
 
-;; ---- calc() -- constant, percentage-free arithmetic only ----
+;; ---- inline style="..." -- parsed by cssom, not here ----
 ;;
-;; Mirrors cssom.core's own calc(...) pipeline (calc-pattern/calc-number-at/
-;; tokenize-calc-expr/parse-calc-level/parse-calc-ast/eval-calc-node/
-;; parse-calc) exactly -- same bounded scope (plain numbers/px lengths only,
-;; no percentage/other relative unit, real CSS's own arithmetic-validity
-;; rules), same tokenize -> parse (precedence climbing) -> evaluate shape.
-;; This namespace's own inline `style="..."` values reach `parse-style-value`
-;; below without ever going through cssom's cascade, so a `calc(...)` in an
-;; inline attribute needs its own copy of this pipeline -- otherwise it
-;; passes through as a raw string and downstream numeric coercion (e.g.
-;; layout's own first-digit-run scrape) silently reads the wrong number.
-
-(def ^:private calc-pattern
-  #"(?is)calc\((.*)\)")
-
-(defn- calc-number-at
-  [s idx]
-  (when-let [num-str (re-find #"^\d+(?:\.\d+)?" (subs s idx))]
-    (let [after (+ idx (count num-str))
-          px? (and (<= (+ after 2) (count s)) (= "px" (subs s after (+ after 2))))
-          end (if px? (+ after 2) after)
-          value #?(:clj (Double/parseDouble num-str) :cljs (js/parseFloat num-str))]
-      [{:calc/type :operand :calc/unit (if px? :px :number) :calc/value value} end])))
-
-(defn- tokenize-calc-expr
-  [s]
-  (let [n (count s)]
-    (loop [idx 0 tokens []]
-      (cond
-        (= idx n) tokens
-        (re-matches #"\s" (str (nth s idx))) (recur (inc idx) tokens)
-        :else
-        (case (nth s idx)
-          \+ (recur (inc idx) (conj tokens {:calc/type :plus}))
-          \- (recur (inc idx) (conj tokens {:calc/type :minus}))
-          \* (recur (inc idx) (conj tokens {:calc/type :star}))
-          \/ (recur (inc idx) (conj tokens {:calc/type :slash}))
-          \( (recur (inc idx) (conj tokens {:calc/type :lparen}))
-          \) (recur (inc idx) (conj tokens {:calc/type :rparen}))
-          (if-let [[operand next-idx] (calc-number-at s idx)]
-            (recur next-idx (conj tokens operand))
-            nil))))))
-
-(defn- parse-calc-level
-  [tokens level]
-  (if (= level 2)
-    (when (seq tokens)
-      (let [t (first tokens)]
-        (case (:calc/type t)
-          :minus (when-let [[node toks] (parse-calc-level (rest tokens) 2)]
-                   [{:calc/op :neg :calc/arg node} toks])
-          :plus (parse-calc-level (rest tokens) 2)
-          :operand [{:calc/op :num :calc/unit (:calc/unit t) :calc/value (:calc/value t)}
-                    (rest tokens)]
-          :lparen (when-let [[node toks] (parse-calc-level (rest tokens) 0)]
-                    (when (and (seq toks) (= :rparen (:calc/type (first toks))))
-                      [node (rest toks)]))
-          nil)))
-    (let [ops (if (= level 0) #{:plus :minus} #{:star :slash})
-          op->ast (fn [op] (case op :plus :add :minus :sub :star :mul :slash :div))]
-      (when-let [[left toks] (parse-calc-level tokens (inc level))]
-        (loop [left left toks toks]
-          (if (and (seq toks) (contains? ops (:calc/type (first toks))))
-            (let [op (:calc/type (first toks))]
-              (if-let [[right toks2] (parse-calc-level (rest toks) (inc level))]
-                (recur {:calc/op (op->ast op) :calc/left left :calc/right right} toks2)
-                nil))
-            [left toks]))))))
-
-(defn- parse-calc-ast
-  [expr-text]
-  (when-let [tokens (tokenize-calc-expr expr-text)]
-    (when-let [[node toks] (parse-calc-level tokens 0)]
-      (when (empty? toks) node))))
-
-(defn- eval-calc-node
-  [node]
-  (case (:calc/op node)
-    :num [(:calc/value node) (:calc/unit node)]
-
-    :neg (when-let [[v u] (eval-calc-node (:calc/arg node))]
-           [(- v) u])
-
-    :add (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
-             (when (= lu ru) [(+ lv rv) lu])))
-
-    :sub (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
-             (when (= lu ru) [(- lv rv) lu])))
-
-    :mul (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
-             (cond
-               (= lu :number) [(* lv rv) ru]
-               (= ru :number) [(* lv rv) lu]
-               :else nil)))
-
-    :div (when-let [[lv lu] (eval-calc-node (:calc/left node))]
-           (when-let [[rv ru] (eval-calc-node (:calc/right node))]
-             (when (and (= ru :number) (not (zero? rv)))
-               [(/ lv rv) lu])))
-
-    nil))
-
-(defn- calc-result->number
-  [value]
-  (let [truncated (long value)]
-    (if (== value truncated) truncated value)))
-
-(defn- parse-calc
-  [expr-text]
-  (when-let [node (parse-calc-ast expr-text)]
-    (when-let [[value _unit] (eval-calc-node node)]
-      (calc-result->number value))))
-
-(defn- parse-style-value
-  [v]
-  (let [v (str/trim v)]
-    (cond
-      (re-matches #"-?\d+" v) #?(:clj (Long/parseLong v) :cljs (js/parseInt v 10))
-      (re-matches #"-?\d+px" v) #?(:clj (Long/parseLong (subs v 0 (- (count v) 2)))
-                                   :cljs (js/parseInt v 10))
-      :else
-      (if-let [[_ inner] (re-matches calc-pattern v)]
-        (or (parse-calc inner) v)
-        v))))
-
-(defn- parse-property-value
-  "parse-style-value, plus the one property whose UNITLESS number is not a
-   length: `line-height`.
-
-   Real CSS reads `line-height: 2` as a ratio of the element's own
-   font-size, and `line-height: 2px` as an absolute length -- but
-   parse-style-value coerces any bare integer to a number, erasing exactly
-   that distinction, so both arrived downstream as the number 2 and
-   cssom.layout's resolve-line-height (which can only read a number as
-   pixels) laid out a TWO-PIXEL line, stacking wrapped lines on top of each
-   other. Confirmed by differential testing against a real browser; the
-   decimal form `line-height: 1.5` was unaffected all along, because a
-   non-integer never matched parse-style-value's coercion in the first
-   place and survived as the string resolve-line-height treats as a
-   multiplier.
-
-   Keeping a unitless integer as a trimmed STRING routes it down that same
-   multiplier branch. `2px` still coerces to 2 and stays absolute.
-
-   This mirrors the identical fix in cssom.core/parse-property-value: an
-   inline `style=\"...\"` attribute is parsed HERE, by this namespace's own
-   independent copy of the declaration parser, and never passes through
-   cssom.core's, so the fix has to exist in both places (see this file's
-   own header comment about that duplication)."
-  [k v]
-  ;; `k` arrives already keywordized from parse-style-declarations, so it
-  ;; has to go through `name` -- `(str :line-height)` is \":line-height\",
-  ;; which would never match and would silently disable this whole branch.
-  (if (and (= "line-height" (str/lower-case (if (keyword? k) (name k) (str k))))
-           (re-matches #"\s*-?\d+\s*" (str v)))
-    (str/trim (str v))
-    (parse-style-value v)))
-
-(def ^:private important-declaration-pattern
-  ;; Mirrors cssom.core's own `!important` regex convention exactly (same
-  ;; case-insensitivity, same optional-leading-whitespace, same anchor at
-  ;; the end of the declaration's value).
-  #"(?i)\s*!important\s*$")
-
-(def ^:private border-style-keywords
-  #{"none" "hidden" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
-
-(defn- border-shorthand-width-token? [tok]
-  (boolean (or (re-matches #"-?\d+" tok) (re-matches #"-?\d+px" tok))))
-
-(defn- expand-border-shorthand
-  "Parses a `border` shorthand value (real CSS's own order-independent
-   grammar, `<line-width> || <line-style> || <color>`) into a map of
-   whichever of `:border-width`/`:border-style`/`:border-color` it
-   actually specifies -- mirrors kotoba-lang/cssom's own identically-
-   scoped `expand-border-shorthand` (same width/color token forms in
-   scope, same functional-notation-color-with-internal-spaces cut) for
-   this repo's OWN, separate initial-HTML-parse inline `style=\"...\"`
-   path, which that repo's fix explicitly did not cover (this repo has
-   no dependency on cssom.core, by design, so the same shorthand logic
-   is duplicated here rather than shared -- consistent with this
-   codebase's existing convention of independently re-implementing a
-   handful of small, identically-scoped helpers across repos rather than
-   introducing a cross-repo dependency for them, e.g. each repo's own
-   `parse-number`/`truthy-attr?`). Returned values are still RAW STRINGS
-   (e.g. `:border-width \"2px\"`), left for `parse-style`'s own later
-   `parse-style-value` coercion step, exactly like every other property
-   this parser handles."
-  [v]
-  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
-    (reduce (fn [result tok]
-              (let [lower (str/lower-case tok)]
-                (cond
-                  (and (not (contains? result :border-width))
-                       (border-shorthand-width-token? tok))
-                  (assoc result :border-width tok)
-
-                  (and (not (contains? result :border-style))
-                       (contains? border-style-keywords lower))
-                  (assoc result :border-style tok)
-
-                  (not (contains? result :border-color))
-                  (assoc result :border-color tok)
-
-                  :else result)))
-            {}
-            tokens)))
-
-(defn- expand-text-shadow-shorthand
-  "Parses a `text-shadow` shorthand value -- mirrors kotoba-lang/cssom's
-   own identically-scoped `expand-text-shadow-shorthand` (same
-   `<offset-x> <offset-y> <blur-radius>? <color>?` grammar, same
-   single-shadow-only scope-cut, same `none` sentinel -- see that repo's
-   own docstring for the full rationale) for this repo's OWN, separate
-   initial-HTML-parse inline `style=\"...\"` path, duplicated here for
-   the same no-cssom-dependency reason `expand-border-shorthand` above
-   already is. Returned values are still RAW STRINGS, left for
-   `parse-style`'s own later `parse-style-value` coercion step, exactly
-   like `expand-border-shorthand` above."
-  [v]
-  (let [v (str/trim (str v))]
-    (if (or (str/blank? v) (= "none" (str/lower-case v)))
-      {:text-shadow-color "none"}
-      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
-        (reduce (fn [result tok]
-                  (cond
-                    (and (not (contains? result :text-shadow-x))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :text-shadow-x tok)
-
-                    (and (contains? result :text-shadow-x)
-                         (not (contains? result :text-shadow-y))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :text-shadow-y tok)
-
-                    (and (contains? result :text-shadow-y)
-                         (not (contains? result :text-shadow-blur))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :text-shadow-blur tok)
-
-                    (not (contains? result :text-shadow-color))
-                    (assoc result :text-shadow-color tok)
-
-                    :else result))
-                {}
-                tokens)))))
-
-(defn- expand-box-shadow-shorthand
-  "Parses a `box-shadow` shorthand value -- mirrors kotoba-lang/cssom's
-   own identically-scoped `expand-box-shadow-shorthand` (same
-   `<offset-x> <offset-y> <blur-radius>? <spread-radius>? <color>?`
-   grammar, same single-non-inset-shadow-only scope-cut -- see that
-   repo's own docstring for the full rationale, including the real,
-   severe spread-radius bug it fixes: a 4th length-shaped token used to
-   fall through into `:box-shadow-color`, silently corrupting/dropping
-   the REAL trailing color token, for the extremely common real-world
-   5-token `box-shadow: 0 1px 2px 0 rgba(...)` shape) for this repo's
-   OWN, separate initial-HTML-parse inline `style=\"...\"` path,
-   duplicated here for the same no-cssom-dependency reason
-   `expand-border-shorthand`/`expand-text-shadow-shorthand` above
-   already are. Unlike `expand-text-shadow-shorthand`, `none`/blank
-   resolves to an EMPTY map, not a sentinel -- box-shadow is not a real
-   inherited CSS property, so there is no ancestor value to cancel.
-   Returned values are still RAW STRINGS, left for `parse-style`'s own
-   later `parse-style-value` coercion step."
-  [v]
-  (let [v (str/trim (str v))]
-    (if (or (str/blank? v) (= "none" (str/lower-case v)))
-      {}
-      (let [tokens (->> (str/split v #"\s+") (remove str/blank?))]
-        (reduce (fn [result tok]
-                  (cond
-                    (and (not (contains? result :box-shadow-x))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-x tok)
-
-                    (and (contains? result :box-shadow-x)
-                         (not (contains? result :box-shadow-y))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-y tok)
-
-                    (and (contains? result :box-shadow-y)
-                         (not (contains? result :box-shadow-blur))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-blur tok)
-
-                    (and (contains? result :box-shadow-blur)
-                         (not (contains? result :box-shadow-spread))
-                         (border-shorthand-width-token? tok))
-                    (assoc result :box-shadow-spread tok)
-
-                    (not (contains? result :box-shadow-color))
-                    (assoc result :box-shadow-color tok)
-
-                    :else result))
-                {}
-                tokens)))))
-
-(def ^:private outline-style-keywords
-  #{"none" "auto" "dotted" "dashed" "solid" "double" "groove" "ridge" "inset" "outset"})
-
-(defn- expand-outline-shorthand
-  "Parses an `outline` shorthand value -- mirrors kotoba-lang/cssom's own
-   identically-scoped `expand-outline-shorthand` (same order-independent
-   `<line-width> || <line-style> || <color>` grammar, same width/color
-   token forms `expand-border-shorthand` above already commits to) for
-   this repo's OWN, separate initial-HTML-parse inline `style=\"...\"`
-   path, duplicated here for the same no-cssom-dependency reason
-   `expand-border-shorthand`/`expand-text-shadow-shorthand`/`expand-box-
-   shadow-shorthand` above already are. `outline-offset` is a real,
-   SEPARATE (non-shorthand) property, not part of this grammar at all.
-   Returned values are still RAW STRINGS, left for `parse-style`'s own
-   later `parse-style-value` coercion step."
-  [v]
-  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))]
-    (reduce (fn [result tok]
-              (let [lower (str/lower-case tok)]
-                (cond
-                  (and (not (contains? result :outline-width))
-                       (border-shorthand-width-token? tok))
-                  (assoc result :outline-width tok)
-
-                  (and (not (contains? result :outline-style))
-                       (contains? outline-style-keywords lower))
-                  (assoc result :outline-style tok)
-
-                  (not (contains? result :outline-color))
-                  (assoc result :outline-color tok)
-
-                  :else result)))
-            {}
-            tokens)))
-
-(def ^:private font-shorthand-style-keywords
-  #{"italic" "oblique"})
-
-(def ^:private font-shorthand-weight-keywords
-  #{"bold" "bolder" "lighter" "100" "200" "300" "400" "500" "600" "700" "800" "900"})
-
-(def ^:private font-shorthand-skip-keywords
-  #{"normal" "small-caps" "condensed" "expanded" "semi-condensed" "semi-expanded"
-    "extra-condensed" "extra-expanded" "ultra-condensed" "ultra-expanded"})
-
-(defn- expand-font-shorthand
-  "Parses a `font` shorthand value -- mirrors kotoba-lang/cssom's own
-   identically-scoped `expand-font-shorthand` (same optional leading
-   style/weight run, same mandatory `<font-size>[/<line-height>]?` then
-   `<font-family>` positional grammar, same `normal`/variant/stretch
-   skip-and-drop keywords, same missing-mandatory-size-or-family
-   degrades-to-empty-map behavior -- see that repo's own docstring for
-   the full rationale) for this repo's OWN, separate initial-HTML-parse
-   inline `style=\"...\"` path, duplicated here for the same no-cssom-
-   dependency reason `expand-border-shorthand`/`expand-text-shadow-
-   shorthand`/`expand-box-shadow-shorthand`/`expand-outline-shorthand`
-   above already are. Returned values are still RAW STRINGS, left for
-   `parse-style`'s own later `parse-style-value` coercion step."
-  [v]
-  (let [tokens (->> (str/split (str/trim (str v)) #"\s+") (remove str/blank?))
-        [leading remaining] (split-with (fn [tok]
-                                           (let [lower (str/lower-case tok)]
-                                             (or (contains? font-shorthand-style-keywords lower)
-                                                 (contains? font-shorthand-weight-keywords lower)
-                                                 (contains? font-shorthand-skip-keywords lower))))
-                                         tokens)]
-    (if (or (empty? remaining) (empty? (rest remaining)))
-      {}
-      (let [size-token (first remaining)
-            family (str/join " " (rest remaining))
-            style-tok (some #(when (contains? font-shorthand-style-keywords (str/lower-case %)) %) leading)
-            weight-tok (some #(when (contains? font-shorthand-weight-keywords (str/lower-case %)) %) leading)
-            [size-part lh-part] (str/split size-token #"/" 2)]
-        (cond-> {:font-size size-part
-                 :font-family family}
-          style-tok (assoc :font-style style-tok)
-          weight-tok (assoc :font-weight weight-tok)
-          lh-part (assoc :line-height lh-part))))))
-
-(defn- parse-style-declarations
-  "Splits a raw inline `style=\"...\"` attribute's text into `[property
-   raw-value important?]` triples -- `raw-value` has any trailing
-   `!important` already stripped, but is NOT yet coerced by
-   `parse-style-value`. Shared parsing step behind both `parse-style` and
-   `style-importance` below, so the two can never drift out of sync on
-   which declarations they see.
-
-   A `border` declaration expands into UP TO THREE separate triples (one
-   per longhand it actually specifies -- see `expand-border-shorthand`),
-   all sharing that one declaration's own `important?` flag -- before
-   this, `style=\"border: 2px solid red\"` was stored verbatim as a
-   single, unrecognized `:border` key, which cssom.layout's `border-ops`
-   never reads, so a real, extremely common inline-style border pattern
-   silently painted nothing at all (confirmed via direct REPL
-   reproduction through the real load-html pipeline)."
-  [style-text]
-  (->> (str/split (or style-text "") #";")
-       (mapcat (fn [decl]
-                 (let [[k v] (map str/trim (str/split decl #":" 2))]
-                   (if (and (seq k) (seq v))
-                     (let [important? (boolean (re-find important-declaration-pattern v))
-                           value (str/replace v important-declaration-pattern "")]
-                       (cond
-                         (= "border" (str/lower-case k))
-                         (map (fn [[longhand longhand-value]]
-                                [longhand longhand-value important?])
-                              (expand-border-shorthand value))
-
-                         (= "text-shadow" (str/lower-case k))
-                         (map (fn [[longhand longhand-value]]
-                                [longhand longhand-value important?])
-                              (expand-text-shadow-shorthand value))
-
-                         (= "box-shadow" (str/lower-case k))
-                         (map (fn [[longhand longhand-value]]
-                                [longhand longhand-value important?])
-                              (expand-box-shadow-shorthand value))
-
-                         (= "outline" (str/lower-case k))
-                         (map (fn [[longhand longhand-value]]
-                                [longhand longhand-value important?])
-                              (expand-outline-shorthand value))
-
-                         (= "font" (str/lower-case k))
-                         (map (fn [[longhand longhand-value]]
-                                [longhand longhand-value important?])
-                              (expand-font-shorthand value))
-
-                         :else
-                         [[(keyword k) value important?]]))
-                     []))))))
+;; An inline `style="..."` attribute IS a CSS declaration block, so it is
+;; parsed by the CSS parser: `cssom.core/parse-declarations-with-importance`,
+;; the same entry point a `<style>` rule body goes through. This namespace
+;; only decides WHERE a declaration block comes from (an attribute on an
+;; element), never what one means.
+;;
+;; It used to mean both. This file carried its own ~330-line copy of that
+;; parser -- the calc() pipeline, five shorthand expanders, the numeric/px
+;; coercion, the `!important` regex -- justified (in the comments now
+;; deleted) as "consistent with this codebase's existing convention of
+;; independently re-implementing a handful of small, identically-scoped
+;; helpers across repos rather than introducing a cross-repo dependency for
+;; them, e.g. each repo's own `parse-number`/`truthy-attr?`". That
+;; justification stopped being true as the copy grew, and the two copies
+;; then drifted exactly the way two copies do: cssom taught its parser to
+;; expand `margin`/`padding` into per-side longhands, this copy was never
+;; told, and so a stylesheet's `padding: 12px` produced five keys while an
+;; inline `style="padding: 12px"` produced one -- while `margin: 4px 8px`
+;; inline produced the raw STRING "4px 8px", which the per-side box model
+;; cannot read at all. Measured through the real pipeline by
+;; kotoba-lang/cssom's conformance harness against a headless Blink: it was
+;; the single largest cascade-attributed cause on the computed-style axis
+;; (`:box/nested-padding`, `:box/border-box-sizing`,
+;; `:box/padding-shifts-content`, `:box/border-and-padding-together`,
+;; `:page/card`, `:inline/inline-block-with-padding`, ...).
+;;
+;; The drift was not limited to margin/padding either: cssom's parser gives
+;; `content`/`counter-reset`/`counter-increment` their own parsing (and
+;; drops an unparseable one rather than storing an unusable value), which
+;; this copy never did, so those three properties also meant different
+;; things inline than in a rule.
+;;
+;; The direction of the new dependency is the one a real browser has: the
+;; HTML parser hands the style attribute's text to the CSS parser. cssom
+;; does not depend on htmldom (only its conformance harness reads this
+;; namespace, off the classpath), so there is no cycle -- and both repos'
+;; CI already checked the other out as a sibling.
 
 (defn parse-style
   "Parses a raw inline `style=\"...\"` attribute's text into a `{property
-   value}` map (`value` coerced by `parse-style-value`).
+   value}` map, identically to a `<style>` rule body with the same text.
 
-   A trailing `!important` on a declaration (real, common CSS -- e.g.
-   `style=\"color: red !important\"`, routinely used to override a
-   stubborn rule-based style) is stripped from the value before coercion.
-   Before this, `!important` was never stripped here at all: the literal
-   suffix stayed IN the value (e.g. `:color \"red !important\"`), which is
-   not merely \"importance ignored\" but a genuinely broken property value
-   -- downstream color/length parsers don't recognize `\"red !important\"`
-   as `\"red\"` at all, so an `!important`-marked inline color/size
-   silently failed to parse and fell back to that property's own
-   unstyled/transparent default instead of ever showing the intended
-   value. See `style-importance` for the separate, additive companion
-   that reports WHICH properties were marked `!important` (needed so
-   `cssom.core` can still rank them correctly against `!important`
-   rule-based declarations -- real CSS's importance/cascade-origin step,
-   not just \"don't corrupt the value\")."
+   Shorthands expand into their longhands (`padding: 12px` gives
+   `:padding` plus the four `:padding-*` sides; likewise `border`,
+   `text-shadow`, `box-shadow`, `outline`, `font`), values are coerced
+   (`12px` -> 12, `calc(2 * 8px)` -> 16, a unitless `line-height` stays a
+   ratio string), and a trailing `!important` is stripped from the value --
+   all of it by `cssom.core`, see this section's own header comment for why
+   none of it lives here any more. `style-importance` is the companion that
+   reports WHICH properties were marked `!important` (needed so
+   `cssom.core` can rank them against `!important` rule-based declarations
+   -- real CSS's importance/cascade-origin step)."
   [style-text]
-  (into {} (map (fn [[k v _]] [k (parse-property-value k v)])) (parse-style-declarations style-text)))
+  (css/parse-declarations style-text))
 
 (defn style-importance
   "The set of property keywords whose declaration in `style-text` (a raw
    inline `style=\"...\"` attribute's text) ended in `!important`.
 
+   A shorthand marked `!important` marks every longhand it expands into --
+   `style=\"padding: 4px !important\"` reports all five padding keys, not
+   just `:padding` -- because those longhands are what the cascade actually
+   ranks, and real CSS applies the shorthand's importance to each of them.
+
    Deliberately a SEPARATE function/attr (`:style-inline-important`, see
    `apply-attrs`) rather than changing `parse-style`'s own `{property
    value}` return shape to also carry importance inline -- `:style-inline`
    has real consumers elsewhere (kotoba-lang/browser's `dom_bridge.cljc`,
-   and several of that repo's own tests) that expect a plain value map and
-   must not be disturbed by this fix."
+   and several of that repo's own tests) that expect a plain value map."
   [style-text]
-  (into #{} (keep (fn [[k _ important?]] (when important? k))) (parse-style-declarations style-text)))
+  (into #{}
+        (keep (fn [[k {:keys [important?]}]] (when important? k)))
+        (css/parse-declarations-with-importance style-text)))
 
 (def ^:private named-char-refs
   "A small, pragmatic subset of HTML5 named character references: the five
@@ -493,8 +101,8 @@
    that would be wildly out of scope for a trusted-HTML-subset parser. Any
    named entity not in this table is left as literal text (`&foo;` stays
    `&foo;`) rather than guessed at, matching this project's existing
-   degrade-don't-guess convention (see `parse-style-value`'s handling of
-   unsupported CSS values)."
+   degrade-don't-guess convention (the same one `cssom.core`'s own value
+   parsing applies to unsupported CSS values)."
   {"amp" "&" "lt" "<" "gt" ">" "quot" "\"" "apos" "'"
    "nbsp" "\u00A0" "copy" "\u00A9" "reg" "\u00AE" "trade" "\u2122"
    "mdash" "\u2014" "ndash" "\u2013" "hellip" "\u2026"
