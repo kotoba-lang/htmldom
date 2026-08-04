@@ -813,21 +813,68 @@
             (recur (inc idx))))
         len))))
 
+(defn- char-at
+  "The single character at `i` as a one-character string, or nil past the
+   end. `subs`-based rather than `nth`/`get` because those return a
+   java.lang.Character on the JVM and a one-character string in
+   ClojureScript, which cannot be compared the same way in `.cljc`."
+  [s i]
+  (when (< i (count s)) (subs s i (inc i))))
+
+(defn- markup-start?
+  "Whether the `<` at `lt` actually OPENS markup, per real HTML5's tag-open
+   state (WHATWG 13.2.5.6): only ASCII alpha (start tag), `/` followed by
+   ASCII alpha (end tag), `!` (markup declaration / comment / doctype) and
+   `?` (bogus comment) do. For ANY other next character the spec emits the
+   `<` as an ordinary character and reconsumes in the data state -- a `<`
+   in running prose is literal text, not a broken tag.
+
+   Measured before this existed, via the conformance harness (see
+   conformance/README.md, `eof/unmatched-lt`): `<p>1 < 2 and 3 > 4</p>`
+   tokenized to a start tag named `2` with an attribute `and`, and the text
+   `2 and 3 >` vanished from the document entirely -- because the scan took
+   the `<` before ` 2` as a tag open and then found the `>` after `3` as its
+   terminator. A real browser produces one text node, `1 < 2 and 3 > 4`.
+   Bare `<` in prose (code snippets, arithmetic, `a < b`) is common enough
+   that this was silent content loss, not an exotic edge case."
+  [html lt]
+  (let [c (char-at html (inc lt))]
+    (boolean
+     (and c (or (some? (re-matches #"[A-Za-z!?]" c))
+                (and (= "/" c)
+                     (when-let [d (char-at html (+ lt 2))]
+                       (some? (re-matches #"[A-Za-z]" d)))))))))
+
 (defn tokenize
   [html]
   (let [html (or html "")
-        len (count html)]
+        len (count html)
+        ;; Text accumulates from `pos` and is only flushed when real markup
+        ;; is reached, so a literal `<` (see `markup-start?`) stays INSIDE
+        ;; the surrounding run and produces one text node rather than
+        ;; splitting it -- which is also what a browser builds, since it
+        ;; appends characters to the text node already at the insertion
+        ;; point.
+        flush (fn [acc end pos]
+                (if (> end pos)
+                  (if-let [t (token (subs html pos end))] (conj acc t) acc)
+                  acc))]
+    ;; `scan` is where the search for the next `<` resumes; `pos` is where
+    ;; the pending text run began. They differ exactly when a `<` turned out
+    ;; to be literal text.
     (loop [pos 0
+           scan 0
            acc []]
-      (let [lt (or (str/index-of html "<" pos) len)
-            acc (if (> lt pos)
-                  (if-let [t (token (subs html pos lt))]
-                    (conj acc t)
-                    acc)
-                  acc)]
+      (let [lt (or (str/index-of html "<" scan) len)]
         (cond
           (>= lt len)
-          acc
+          (flush acc len pos)
+
+          ;; Not a tag open at all (see `markup-start?`): the `<` is an
+          ;; ordinary character. Keep it in the pending text run and carry
+          ;; on looking for the next `<`.
+          (not (markup-start? html lt))
+          (recur pos (inc lt) acc)
 
           ;; HTML comment: scanned literally for its real `-->` terminator so
           ;; a `>` inside the comment body can't truncate it and corrupt the
@@ -854,20 +901,29 @@
           ;; otherwise it keeps scanning forward to the real terminator
           ;; exactly as before.
           (str/starts-with? (subs html lt) "<!--")
-          (let [end (str/index-of html "-->" (+ lt 2))]
-            (recur (if end (+ end 3) len) acc))
+          (let [acc (flush acc lt pos)
+                end (str/index-of html "-->" (+ lt 2))
+                next-pos (if end (+ end 3) len)]
+            (recur next-pos next-pos acc))
 
           :else
-          (let [gt (tag-close-index html lt)]
+          (let [acc (flush acc lt pos)
+                gt (tag-close-index html lt)]
             (if (nil? gt)
-              ;; No terminating '>' anywhere in the rest of the input: drop
-              ;; this lone '<' (matches the old regex tokenizer's lenient
-              ;; behavior of silently skipping an unmatched '<') and continue.
-              (recur (inc lt) acc)
+              ;; A real tag open with no terminating '>' anywhere in the rest
+              ;; of the input (including an attribute quote that never
+              ;; closes). WHATWG's eof-in-tag parse error DROPS the partial
+              ;; tag and everything the tokenizer had consumed into it, so
+              ;; the input simply ends here. Measured (conformance case
+              ;; `eof/unterminated-tag`): `<p>a</p><div class="x` produced a
+              ;; visible text node reading `div class="x` -- raw markup
+              ;; leaking into the rendered document -- where a browser shows
+              ;; nothing at all.
+              acc
               (let [raw (subs html lt (inc gt))]
                 (if (or (str/starts-with? raw "<!") (str/starts-with? raw "<?"))
                   ;; doctype / processing instruction: discarded, as before.
-                  (recur (inc gt) acc)
+                  (recur (inc gt) (inc gt) acc)
                   (let [raw-tag (raw-text-tag-name html lt gt)
                         open-tok (token raw)]
                     (if (and raw-tag (not (:self? open-tok)))
@@ -898,11 +954,13 @@
                             acc (cond-> acc open-tok (conj open-tok))
                             acc (if (seq text) (conj acc {:type :text :text text}) acc)]
                         (if (< close-idx len)
-                          (let [close-gt (or (str/index-of html ">" close-idx) len)]
-                            (recur (if (< close-gt len) (inc close-gt) len)
+                          (let [close-gt (or (str/index-of html ">" close-idx) len)
+                                next-pos (if (< close-gt len) (inc close-gt) len)]
+                            (recur next-pos next-pos
                                    (conj acc {:type :end :tag raw-tag})))
-                          (recur len acc)))
-                      (recur (inc gt) (if open-tok (conj acc open-tok) acc)))))))))))))
+                          (recur len len acc)))
+                      (recur (inc gt) (inc gt)
+                             (if open-tok (conj acc open-tok) acc)))))))))))))
 
 (defn- apply-attrs
   [document id attrs]
@@ -1453,7 +1511,24 @@
                        ;; before layout ever ran. cssom.layout collapses
                        ;; them for `normal`/`nowrap`, which is where that
                        ;; decision belongs.
-                       (str/replace text #"[^\S\n]+" " "))
+                       ;;
+                       ;; The character class is spelled out rather than
+                       ;; written as `[^\S\n]` (everything `\s` matches
+                       ;; except newline), because `\s` ALSO matches U+00A0
+                       ;; NO-BREAK SPACE -- so `&nbsp;`, having just been
+                       ;; correctly decoded to U+00A0 by `decode-entities`,
+                       ;; was immediately rewritten back to an ordinary
+                       ;; U+0020 and became collapsible again. That destroys
+                       ;; the one thing `&nbsp;` exists to do, and CSS says
+                       ;; so explicitly: only spaces, tabs and segment breaks
+                       ;; are collapsible white space; U+00A0 is not.
+                       ;; Measured against a real browser by the conformance
+                       ;; harness (case `entity/nbsp-is-not-collapsible`):
+                       ;; `<p>a&nbsp;b</p>` gave the browser codepoints
+                       ;; 97/160/98 and this parser 97/32/98. The class below
+                       ;; is exactly HTML's own "ASCII whitespace" set minus
+                       ;; the newline this deliberately keeps.
+                       (str/replace text #"[ \t\f\r]+" " "))
                 [document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-text-node document text)]
             (recur (dom/append-child document (peek stack) id) stack afe (next tokens)))

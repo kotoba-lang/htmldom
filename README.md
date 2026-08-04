@@ -22,10 +22,20 @@ default-selected initialization). See the `htmldom.core` docstring.
 |---|---|
 | Role | ui-substrate |
 | Tests | `clojure -M:test` |
-| WHATWG HTML compatibility | not a goal (trusted subset only) |
+| WHATWG HTML compatibility | not a goal (trusted subset only) — **measured at 88% tree shape** vs headless Chrome, see `conformance/` |
 
 ## Test
 
 ```bash
 clojure -M:test
+```
+
+## Conformance
+
+`conformance/` parses the same markup through this parser and through a real
+headless Chrome and compares the tree shape, so "trusted subset only" is a
+number rather than a disclaimer. See `conformance/README.md`.
+
+```bash
+nbb --classpath "src:../dom-gpu/src" conformance/run.cljs
 ```
