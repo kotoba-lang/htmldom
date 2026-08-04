@@ -144,9 +144,24 @@
       "four values are clockwise from the top"))
 
 (deftest inline-style-box-shorthand-this-engine-cannot-resolve-stays-unexpanded
-  (is (= {:margin "0 auto"} (html/parse-style "margin: 0 auto"))
-      "`auto` needs real layout against the container -- degrade, don't
-       guess a number for the horizontal sides")
+  ;; `margin: 0 auto` USED to stay unexpanded here, on the reasoning that
+  ;; `auto` needs real layout against the container so the parser should
+  ;; degrade rather than guess a number. The guess was never the only
+  ;; option: `auto` is a keyword, and expanding to longhands that CARRY the
+  ;; keyword loses nothing and lets layout do the resolving.
+  ;;
+  ;; kotoba-lang/cssom made that change (its `expand-box-side-shorthand`
+  ;; now admits `auto` for `margin` only -- `padding: auto` is not CSS),
+  ;; and this parser delegates all style parsing to `cssom.core`, so the
+  ;; behaviour arrives here. Measured consequence in the layout engine: a
+  ;; `margin: 0 auto` block is now centred, which it was not before.
+  ;;
+  ;; The half that still degrades is the percentage below, and for the
+  ;; original reason: 10% of WHAT is not knowable at parse time.
+  (is (= {:margin 0 :margin-top 0 :margin-right "auto"
+          :margin-bottom 0 :margin-left "auto"}
+         (html/parse-style "margin: 0 auto"))
+      "auto survives as a keyword in the longhands, for layout to resolve")
   (is (= {:padding "10%"} (html/parse-style "padding: 10%"))))
 
 (deftest inline-style-padding-shorthand-through-the-full-document-parse
@@ -1982,3 +1997,29 @@
       (is (= :foreignobject (:tag fo)))
       (is (= [:div] (mapv :tag (:children fo)))
           "the div stays inside, where the same div directly in <svg> breaks out"))))
+
+(deftest template-contents-go-into-the-content-fragment
+  ;; A <template>'s contents are not its children. Measured in Brave for
+  ;; four shapes -- plain, in a table, nested, bare text --
+  ;; `template.childNodes.length` is 0 in every one.
+  (testing "the element renders empty and the fragment holds the tree"
+    (let [doc (html/parse-into-document "<div><template><p>inside</p></template><p>after</p></div>")
+          div (first (:children (dom/tree doc)))
+          [tpl after] (:children div)]
+      (is (= :template (:tag tpl)))
+      (is (empty? (:children tpl)))
+      (is (= :p (:tag after)))
+      (is (= [:p] (mapv :tag (dom/content-tree doc (:node/id tpl)))))))
+  (testing "a template in a table is not foster-parented, and nothing is scaffolded"
+    ;; Two separate barriers had to hold for this: the table's
+    ;; "clear back to table context" step must not pop the template (it did,
+    ;; which is why the <td> arrived after the template had been closed),
+    ;; and the implied tbody/tr scaffolding must not fire inside one.
+    ;; Brave gives a template whose content is a single <td> -- no tbody,
+    ;; no tr.
+    (let [doc (html/parse-into-document "<table><template><td>x</td></template></table>")
+          table (first (:children (dom/tree doc)))
+          [tpl] (:children table)]
+      (is (= [:template] (mapv :tag (:children table)))
+          "the template is the table's only child: no synthesized row group")
+      (is (= [:td] (mapv :tag (dom/content-tree doc (:node/id tpl))))))))
