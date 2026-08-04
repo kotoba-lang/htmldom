@@ -1197,9 +1197,25 @@
    does this node go\" into a DOM mutation, so text nodes, elements and
    reconstructed formatting elements cannot disagree about it."
   [document stack node-id foster?]
-  (if-let [[parent-id before-id] (and foster? (foster-parent-place document stack))]
-    (dom/insert-before document parent-id node-id before-id)
-    (dom/append-child document (peek stack) node-id)))
+  (let [parent (peek stack)]
+    (cond
+      ;; A <template>'s contents are not its children: they go into its
+      ;; content fragment (kotoba.wasm.dom/append-content-child). Measured
+      ;; in Brave across four shapes -- a plain template, one inside a
+      ;; table, a nested template, bare text -- `template.childNodes.length`
+      ;; is 0 in every one.
+      ;;
+      ;; Checked BEFORE foster parenting on purpose: a template is allowed
+      ;; inside a table, and its contents stay in it. `<table><template>
+      ;; <td>x</td></template></table>` keeps the <td> in the fragment
+      ;; rather than fostering it out in front of the table.
+      (= :template (get-in document [:nodes parent :tag]))
+      (dom/append-content-child document parent node-id)
+
+      :else
+      (if-let [[parent-id before-id] (and foster? (foster-parent-place document stack))]
+        (dom/insert-before document parent-id node-id before-id)
+        (dom/append-child document parent node-id)))))
 
 (def ^:private ascii-whitespace-only
   "A text run made ENTIRELY of HTML's own ASCII whitespace, which \"in
@@ -1264,7 +1280,16 @@
 (defn- clear-to-table-context
   [document stack tag-kw]
   (if-let [targets (get table-clear-targets tag-kw)]
-    (if (open-table-index document stack)
+    ;; A <template> is a BARRIER: its contents are parsed in their own
+    ;; insertion mode, so a table-structure tag inside one neither pops the
+    ;; template nor reaches the table around it. Without this the template
+    ;; was popped before its own <td> arrived, and the table then
+    ;; scaffolded tbody/tr/td as a SIBLING of the template -- measured, and
+    ;; the reason `:template/in-a-table` still failed after the content
+    ;; fragment itself worked.
+    (if (and (open-table-index document stack)
+             (not (contains? (set (map #(get-in document [:nodes % :tag]) stack))
+                             :template)))
       (if-let [i (innermost-index document stack targets)]
         (subvec stack 0 (inc i))
         stack)
@@ -1328,6 +1353,14 @@
               [(dom/append-child document (peek stack) id) (conj stack id)]))
           (top [document stack] (get-in document [:nodes (peek stack) :tag]))]
     (cond
+      ;; Inside a <template>, nothing is scaffolded. A template's contents
+      ;; are parsed in their own insertion mode and land in its content
+      ;; fragment, so a bare <td> there stays a bare <td>. Measured in
+      ;; Brave: `<table><template><td>x</td></template></table>` gives a
+      ;; template whose content is a single <td> -- no tbody, no tr, and
+      ;; the template itself is not foster-parented out of the table.
+      (= :template (top document stack))
+      [document stack]
       (and (= tag-kw :tr) (= :table (top document stack)))
       (open document stack :tbody)
 
