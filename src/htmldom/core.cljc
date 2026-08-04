@@ -486,8 +486,15 @@
 
           ;; HTML comment: scanned literally for its real `-->` terminator so
           ;; a `>` inside the comment body can't truncate it and corrupt the
-          ;; rest of the token stream. Comments produce no token (discarded),
-          ;; matching prior behavior.
+          ;; rest of the token stream, and emitted as a real `:comment`
+          ;; token.
+          ;;
+          ;; It used to be discarded, for the honest reason that there was
+          ;; nowhere to put it: `kotoba.wasm.dom` had no comment node type
+          ;; at all until 2026-08-04. Discarding is not neutral -- it MERGES
+          ;; the text on either side into one node where a browser keeps two
+          ;; (`a<!--c-->b` gave a single "ab"), so three conformance cases
+          ;; failed on text structure as well as on the missing node.
           ;;
           ;; Real HTML5's two "abrupt-closing-of-empty-comment" forms --
           ;; `<!-->` and `<!--->` -- are complete, empty, immediately-
@@ -511,8 +518,16 @@
           (str/starts-with? (subs html lt) "<!--")
           (let [acc (flush acc lt pos)
                 end (str/index-of html "-->" (+ lt 2))
-                next-pos (if end (+ end 3) len)]
-            (recur next-pos next-pos acc))
+                next-pos (if end (+ end 3) len)
+                ;; the comment's DATA: everything between the `<!--` and the
+                ;; terminator. The two abrupt-closing forms (`<!-->` and
+                ;; `<!--->`, which reuse the marker's own dashes as the
+                ;; closer) yield empty data, which is exactly what a browser
+                ;; reports for them.
+                data (if (and end (> end (+ lt 4)))
+                       (subs html (+ lt 4) end)
+                       "")]
+            (recur next-pos next-pos (conj acc {:type :comment :data data})))
 
           :else
           (let [acc (flush acc lt pos)
@@ -1626,8 +1641,19 @@
            stack [root-id]
            afe []
            tokens (seq (tokenize html))]
-      (if-let [{:keys [type tag attrs self? text]} (first tokens)]
+      (if-let [{:keys [type tag attrs self? text data]} (first tokens)]
         (case type
+          ;; A comment is inserted at the current insertion point and
+          ;; changes nothing else: it does not close anything, does not
+          ;; reconstruct active formatting, and carries no layout. Its one
+          ;; observable effect on structure is that the text before and
+          ;; after it stay SEPARATE nodes, which is what discarding it used
+          ;; to destroy.
+          :comment
+          (let [[id document] (dom/create-comment-node document data)
+                document (dom/append-child document (peek stack) id)]
+            (recur document stack afe (next tokens)))
+
           :text
           (let [text (if (preserve-whitespace-context? document stack)
                        text

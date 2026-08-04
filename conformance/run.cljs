@@ -251,17 +251,26 @@
    `parse-into-document` builds a `:document` root element and hangs the
    fragment's own top-level nodes directly under it, so the root's CHILDREN
    line up with the oracle's context <div>'s children -- depth 0 on both
-   sides is 'a top-level node of the fragment'. `dom/tree` gives elements as
-   maps and text nodes as bare strings; there is no comment node type in
-   `kotoba.wasm.dom` at all, which is why the oracle's `:comment` entries
-   have nothing to line up against (see README, 'what is excluded')."
+   sides is 'a top-level node of the fragment'. `dom/comment-tree` gives
+   elements as maps, text nodes as bare strings and comments as
+   `{:node/type :comment :text ...}` -- the DOM view, rather than
+   `dom/tree`'s layout view which omits comments by design. This harness
+   compares against a browser's node list, so it wants the view that keeps
+   them; until comment nodes existed at all, the oracle's `:comment`
+   entries had nothing on this side to line up against."
   [html-src]
-  (let [root (dom/tree (html/parse-into-document html-src))
+  (let [root (dom/comment-tree (html/parse-into-document html-src))
         out (volatile! [])]
     (letfn [(rec [node depth]
               (doseq [c (:children node)]
-                (if (string? c)
+                (cond
+                  (string? c)
                   (vswap! out conj {:k "t" :d depth :v c})
+
+                  (= :comment (:node/type c))
+                  (vswap! out conj {:k "c" :d depth :v (:text c)})
+
+                  :else
                   (do (vswap! out conj {:k "e" :d depth
                                         :n (name (:tag c))
                                         :a (into {} (map (fn [[k v]] [(name k) (str v)]))
