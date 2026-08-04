@@ -1670,8 +1670,23 @@
                   (filter #(= :text (:node/type %)))
                   (map :text)
                   (str/join ""))]
-    (is (str/includes? text "&notarealentity;")
-        "an unknown entity is still left alone rather than guessed at")))
+    ;; This assertion used to require the whole string to survive as
+    ;; literal text, on the reasoning that an unknown entity should be left
+    ;; alone rather than guessed at. Measured in Brave, that is not what a
+    ;; browser does: `&notarealentity;` becomes U+00AC followed by
+    ;; "arealentity;", because `not` is one of the ~106 LEGACY named
+    ;; references that resolve without a trailing semicolon, and the spec
+    ;; takes the longest match from that closed list.
+    ;;
+    ;; So the old expectation was not conservative, it was wrong -- and
+    ;; being wrong the same way for `&ampb` is what made `a&ampb` render as
+    ;; source text. What is still left alone is a name that is NOT on the
+    ;; legacy list: see the `&middot` case below and
+    ;; `:entity/no-semicolon-in-attribute` in the corpus.
+    (is (str/starts-with? text "\u00ACarealentity;")
+        "the longest LEGACY name (`not`) resolves; the rest stays literal")
+    (is (not (str/includes? text "&not"))
+        "the source form of the resolved part is gone")))
 
 (deftest bare-lt-in-prose-is-literal-text
   ;; Found by conformance/ (case `eof/lt-gt-in-prose`): `<p>1 < 2 and 3 >
