@@ -1232,38 +1232,18 @@
        (contains? table-content-tags tag-kw)))
 
 ;; ------------------------------------------------------------
-;; SCOPE CUT: formatting still open when a table cell is entered.
-;; What the block above deliberately does NOT do, written at the boundary
-;; it stops at.
+;; Formatting still open when a table cell is entered WAS the scope cut
+;; written at this boundary: `<table><b>bold<tr><td>x` put a `<b>` around
+;; the cell's text where a browser leaves a bare `#text "x"`, because
+;; there were no scope markers in the list of active formatting elements
+;; and the still-listed `<b>` was reconstructed on entry to the cell.
+;; Foster parenting is what made it reachable, which is why it was written
+;; down here.
 ;;
-;; The spec inserts a MARKER into the list of active formatting elements
-;; when it opens a `td`/`th`/`caption` (and an `applet`/`marquee`/`object`
-;; /`template`), and "reconstruct the active formatting elements" never
-;; walks back past the last marker. That is what stops formatting which
-;; was open when the table started from being re-created inside the first
-;; cell. There are no markers here -- the L2 commentary below already
-;; lists them as deferred -- and foster parenting makes the gap REACHABLE
-;; for the first time, because a formatting element opened in table
-;; context now genuinely stays open with the table's row structure built
-;; underneath it.
-;;
-;; So: `<table><b>bold<tr><td>x` (an unclosed `<b>` inside a table).
-;; Measured in Brave: `<b>bold</b>`, then the table, and the cell holds a
-;; bare `#text "x"`. Here the cell holds `<b>x</b>` instead, because the
-;; still-listed `<b>` is reconstructed on entry to the cell. The
-;; foster-parented `<b>bold</b>` itself, the row structure and everything
-;; outside the table are correct; what is wrong is confined to formatting
-;; leaking INTO cells, and only when the author left the formatting
-;; element unclosed across the table's first row.
-;;
-;; Closing it needs markers threaded through `push-afe`,
-;; `reconstruct-active-formatting` and the adoption agency's step 4.3
-;; ("the last element ... between the end of the list and the last
-;; marker"), plus "clear the list up to the last marker" when the cell
-;; closes -- i.e. it is a change to the formatting algorithms, not to
-;; table handling, and it is scoped as such rather than smuggled in here.
-;; `<table><b>bold</b><tr>...`, where the author did close the element, is
-;; unaffected: the adoption agency removes it from the list at `</b>`.
+;; It is closed. The markers are implemented as `afe-marker-tags` /
+;; `afe-marker` / `prune-cleared-markers` in the formatting section below,
+;; which is where the change belonged -- it is a change to the formatting
+;; algorithms, not to table handling, and nothing in THIS block moved.
 
 (defn- preserve-whitespace-context?
   "Whether the CURRENT stack means whitespace in an about-to-be-created
@@ -1304,10 +1284,8 @@
 ;; `auto-close-tags`): the adoption agency's furthest-block reparenting path
 ;; (steps 9-19 -- rare block-in-inline like <b><p>x</b>, falls back to naive
 ;; nesting here, no crash); the full 23-mode insertion-mode state machine;
-;; html/head/body synthesis; template/select/frameset modes; scope markers
-;; (so formatting still open when a table starts leaks into the first cell
-;; -- the SCOPE CUT comment above sizes exactly what that costs); the
-;; `a`/`nobr` in-scope special cases; "generate implied end tags" for the
+;; html/head/body synthesis; template/select/frameset modes; the `a`/`nobr`
+;; in-scope special cases; "generate implied end tags" for the
 ;; any-other-end-tag path.
 ;;
 ;; Foster parenting (in-table) WAS on this list and no longer is: it is
@@ -1315,6 +1293,14 @@
 ;; prose, without the insertion-mode machine -- the stack of open elements
 ;; carries the same information for this one decision, and the block says
 ;; where that equivalence stops.
+;;
+;; Scope MARKERS were on it too, and are likewise implemented -- see
+;; `afe-marker-tags` -- by the same move: a marker stays live exactly as
+;; long as its element is on the stack of open elements, so "clear the list
+;; up to the last marker" needs no insertion modes and no threading of the
+;; afe list through the four places a cell can be popped. What is NOT
+;; implemented is the marker for `applet`/`marquee`/`object`/`template`,
+;; and that set's docstring says why (no probe distinguishes them).
 
 (def ^:private formatting-tags
   "WHATWG §13.2.4.2 'Formatting' category -- start tags that push onto the
@@ -1330,14 +1316,100 @@
 
 (defn- tag-of [document id] (get-in document [:nodes id :tag]))
 
+(def ^:private afe-marker-tags
+  "Start tags that push a MARKER onto the list of active formatting
+   elements (WHATWG §13.2.4.3). A marker is a floor: \"reconstruct the
+   active formatting elements\" never walks back past one, the adoption
+   agency never looks for its formatting element past one, and closing the
+   element that pushed it clears the list back to it.
+
+   That is what keeps formatting out of table cells. Measured in Brave 151:
+   `<table><b>bold<tr><td>x` gives the cell a bare `#text \"x\"` -- the `<b>`
+   is still open, and is still foster-parented out in front of the table,
+   but it does not come back inside the cell. And the marker is what makes
+   the CLEARING observable in the other direction:
+   `<b>a<table><tr><td><i>b</td><td>c</table>d` puts `<i>b</i>` in the first
+   cell, a bare `#text \"c\"` in the second (the `<i>` was cleared when the
+   first cell closed) and `#text \"d\"` inside the `<b>` but NOT inside an
+   `<i>` (the `<b>`, pushed BEFORE the marker, survives). One rule explains
+   all three.
+
+   The spec's list also has `applet`, `marquee`, `object` and `template`,
+   and they are deliberately NOT here. Each of those four RECONSTRUCTS
+   before it inserts itself (measured -- `<div><em>x</div><applet>y</applet>`
+   puts the `<applet>` inside a reopened `<em>`), which puts the formatting
+   element back on the stack of open elements, at which point every later
+   reconstruction inside the element is a no-op whether a marker exists or
+   not. So no probe distinguishes them, and adding them on the strength of
+   the prose alone would be an unmeasured claim in a set whose whole value
+   is that it is measured. `template` has a second reason: its content
+   belongs in a separate document fragment, which this parser does not
+   model at all (a browser reports `<template>` with no children; this
+   parser nests them), so its marker is not the interesting difference
+   there."
+  #{:td :th :caption})
+
+(defn- afe-marker
+  "A marker, tagged with the id of the element that pushed it.
+
+   Carrying the id is what lets the marker be REMOVED without threading the
+   afe list through every place a cell can be popped -- and a cell can be
+   popped from four of them (`auto-close-stack` on a sibling cell,
+   `clear-to-table-context`, `close-open-table-for-nested-table`, and the
+   `:end` case), none of which sees the afe list today. Instead the marker
+   stays live exactly as long as its element is on the stack of open
+   elements, and `prune-cleared-markers` does the spec's \"clear the list of
+   active formatting elements up to the last marker\" when it is not. Same
+   move as the rest of the table handling in this file: read the answer off
+   the stack of open elements rather than off insertion modes this parser
+   does not have."
+  [id]
+  [::marker id])
+
+(defn- marker? [e] (and (vector? e) (= ::marker (first e))))
+
+(defn- prune-cleared-markers
+  "WHATWG's \"clear the list of active formatting elements up to the last
+   marker\", applied lazily: a marker whose element is no longer on the
+   stack of open elements has had its element closed, so it and everything
+   pushed after it are dropped.
+
+   Called before the afe list is read and before it is extended, which
+   keeps the invariant that a dead marker is always the LAST marker -- so
+   cutting at the first dead one cannot discard a live marker pushed after
+   it. (A cell only opens through the `:start` case, which prunes first.)
+
+   Takes only the stack: unlike the other afe helpers this needs no
+   `document`, because a marker carries its element's id directly and the
+   only question is whether that id is still open."
+  [stack afe]
+  (let [afe (vec afe)
+        on-stack? (fn [id] (some #(= % id) stack))
+        dead (first (keep-indexed (fn [i e]
+                                    (when (and (marker? e) (not (on-stack? (second e))))
+                                      i))
+                                  afe))]
+    (if dead (subvec afe 0 dead) afe)))
+
+(defn- afe-segment-start
+  "Index just past the last marker -- the start of the segment the spec's
+   afe operations are scoped to (\"between the end of the list and the last
+   marker in the list, if any, or the start of the list otherwise\")."
+  [afe]
+  (or (some (fn [i] (when (marker? (nth afe i)) (inc i)))
+            (range (dec (count afe)) -1 -1))
+      0))
+
 (defn- push-afe
   "Push `id` onto the afe list with the Noah's Ark clause (WHATWG §13.2.4.3):
   if there are already three entries with the same tag, remove the earliest
-  before adding. (No markers in L2 -- see namespace commentary -- so the
-  whole list is one segment.)"
+  before adding. The clause counts only the entries AFTER the last marker,
+  which is what the spec means by 'in the list' there."
   [document afe id]
-  (let [tag (tag-of document id)
-        same-tag (filter #(= (tag-of document %) tag) afe)]
+  (let [afe (vec afe)
+        tag (tag-of document id)
+        same-tag (filter #(= (tag-of document %) tag)
+                         (subvec afe (afe-segment-start afe)))]
     (if (>= (count same-tag) 3)
       (conj (vec (remove #(= % (first same-tag)) afe)) id)
       (conj afe id))))
@@ -1378,20 +1450,28 @@
   "WHATWG §13.2.4.3. Reopens formatting elements that are in the afe list but
   no longer on the stack of open elements (they were implicitly closed by an
   end tag for an ancestor), so subsequent text/elements inherit the active
-  formatting. No-op when the list is empty or the last entry is already on
-  the stack. Returns [document stack afe]."
+  formatting. No-op when the list is empty, when the last entry is a marker
+  (the spec's step 2), or when the last entry is already on the stack.
+
+  Prunes markers whose element has closed first, so the pruned list is what
+  every caller gets back -- this is the one place the spec's 'clear the list
+  up to the last marker' actually happens (see `afe-marker`). Returns
+  [document stack afe]."
   [document stack afe]
-  (let [v (vec afe)
+  (let [v (prune-cleared-markers stack afe)
         n (count v)]
     (if (or (zero? n)
+            (marker? (peek v))
             (some #(= % (peek v)) stack))
-      [document stack afe]
+      [document stack v]
       (let [in-stack? (fn [e] (some #(= % e) stack))
-            ;; rewind: largest index < n-1 whose entry is in the stack; entries
+            ;; rewind: largest index < n-1 whose entry is in the stack OR is
+            ;; a marker (reconstruction never walks back past one); entries
             ;; after it need reconstruction. -1 if none (reconstruct from 0).
             boundary (loop [i (- n 2)]
                        (cond
                          (< i 0) -1
+                         (marker? (nth v i)) i
                          (in-stack? (nth v i)) i
                          :else (recur (dec i))))
             from (inc boundary)]
@@ -1505,14 +1585,19 @@
   Returns [document stack afe]."
   [document stack afe subject]
   (let [stack (vec stack)
-        afe (vec afe)
+        afe (prune-cleared-markers stack afe)
         current (peek stack)]
     (if (and (= (tag-of document current) subject)
              (not (some #(= % current) afe)))
       ;; step 2: current node is subject and not in afe -> pop, return.
       [document (pop stack) afe]
-      (let [;; step 4.3: formattingElement = last afe entry with tag subject
-            fmt (last (filter #(= (tag-of document %) subject) afe))]
+      (let [;; step 4.3: formattingElement = the last entry with tag subject
+            ;; "between the end of the list and the last marker in the list,
+            ;; if any" -- so formatting opened before a cell was entered is
+            ;; invisible to an end tag inside that cell, and falls through to
+            ;; the any-other-end-tag path below exactly as the spec says.
+            fmt (last (filter #(= (tag-of document %) subject)
+                              (subvec afe (afe-segment-start afe))))]
         (if (nil? fmt)
           ;; no formatting element -> any-other-end-tag: pop to subject.
           (let [match-idx (find-top-match-index document stack subject)]
@@ -1606,6 +1691,18 @@
                 stack (close-open-table-for-nested-table document stack tag-kw)
                 stack (clear-to-table-context document stack tag-kw)
                 [document stack] (maybe-insert-implied-table-structure document stack tag-kw)
+                ;; Now that the stack has settled, retire any marker whose
+                ;; element those pops just closed (WHATWG "clear the list of
+                ;; active formatting elements up to the last marker", see
+                ;; `afe-marker`). Done HERE, before either the reconstruct
+                ;; below or the push at the bottom, so both see a list with
+                ;; no dead markers in it -- which is the invariant that lets
+                ;; `prune-cleared-markers` cut at the first dead marker.
+                ;; It matters on this token, not the next one: a sibling
+                ;; `<td>` closes the previous cell and opens the next in one
+                ;; step, and without this the new cell's marker would be
+                ;; pushed behind the old cell's dead one.
+                afe (prune-cleared-markers stack afe)
                 ;; Reconstruct active formatting elements before inserting any
                 ;; new element (WHATWG in-body), so mis-nested formatting that
                 ;; was implicitly closed reopens around the new element --
@@ -1623,9 +1720,13 @@
                              ;; spelled out in the `:text` case above.
                              (insert-node stack id
                                           (foster-parented-element? document stack tag-kw attrs)))
-                afe (if (contains? formatting-tags tag-kw)
-                      (push-afe document afe id)
-                      afe)
+                afe (cond
+                      (contains? formatting-tags tag-kw) (push-afe document afe id)
+                      ;; A cell (or caption) pushes a marker, so formatting
+                      ;; left open outside the table is not recreated inside
+                      ;; it (see `afe-marker-tags`).
+                      (contains? afe-marker-tags tag-kw) (conj (vec afe) (afe-marker id))
+                      :else afe)
                 remaining (next tokens)
                 ;; WHATWG spec: if a <pre>'s content begins with a single
                 ;; U+000A LINE FEED, that one character is silently dropped

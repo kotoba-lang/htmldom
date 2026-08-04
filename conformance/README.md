@@ -24,11 +24,12 @@ this is the parser's own equivalent, and the first run found two.
 
 ## Result
 
-**Tree shape: 109/118 = 92%.** The first run, on 2026-08-04 against the
+**Tree shape: 115/122 = 94%.** The first run, on 2026-08-04 against the
 unmodified parser, was 82/100 = 82%; the corpus has grown since, so the two
 numbers are not directly comparable — the map underneath them is the point.
-The most recent change (the reconstruction fix below) scored 102/113 → 104/113
-on the corpus as it stood, and added five cases with it. Per group:
+The two most recent changes, each measured on the corpus as it stood before
+it: the reconstruction fix 102/113 → 104/113 (+5 cases), then scope markers
+109/118 → 111/118 (+4 cases). Per group:
 
 | group | | | |
 |---|---|---|---|
@@ -36,18 +37,18 @@ on the corpus as it stood, and added five cases with it. Per group:
 | eof | 8/8 | 100% | after the tag-open fix; was 3/8 |
 | form | 4/4 | 100% | |
 | list | 6/6 | 100% | |
+| omission | 11/11 | 100% | after the reconstruction fix; was 5/8 |
 | paragraph | 7/7 | 100% | |
 | rawtext | 9/9 | 100% | |
+| table | 25/25 | 100% | after foster parenting then markers; was 12/16 |
 | whitespace | 5/5 | 100% | |
-| table | 20/21 | 95% | after foster parenting; was 12/16 |
 | formatting | 12/13 | 92% | |
-| omission | 10/11 | 91% | after the reconstruction fix; was 5/8 |
 | entity | 7/8 | 88% | after the nbsp fix; was 6/8 |
 | misc | 4/5 | 80% | |
 | selfclose | 4/5 | 80% | |
 | **comment** | **1/4** | **25%** | structurally impossible today |
 
-**Attributes** (a secondary axis, see below): 339/340 comparable elements
+**Attributes** (a secondary axis, see below): 366/367 comparable elements
 carry exactly the browser's attribute map.
 
 82% on the first run was already higher than the repo's own framing would
@@ -55,9 +56,9 @@ predict, and that was a real finding: optional end tags, implied `<tbody>`,
 misnested formatting, raw text, entity decoding and attribute tokenization
 were in far better shape than "trusted subset only" suggests — the parser
 had quietly grown most of an in-body insertion mode. The remaining failures
-are not scattered; they are three causes.
+are not scattered; they are two causes.
 
-## The three causes, in order of size
+## The two causes, in order of size
 
 **1. Comments have no node type (3 cases).** `kotoba.wasm.dom` knows only
 `:element` and `:text`; `tokenize` therefore discards comments entirely.
@@ -66,23 +67,7 @@ which is why the harness special-cases the category (see
 `divergence-category`) instead of reporting the shifted text that follows.
 Fixing this needs a change in `kotoba-lang/dom-gpu`, not here.
 
-**2. No scope markers in the list of active formatting elements (2 cases).**
-The spec pushes a marker when it opens a `td`/`th`/`caption` (and an
-`applet`/`marquee`/`object`/`template`), and reconstruction never walks back
-past it. Without markers, formatting still open when a table starts is
-recreated inside the first cell: `<table><b>bold<tr><td>x` gives a browser a
-bare `#text "x"` in the cell and gives this parser `<b>x</b>`. Everything
-else about that shape — the foster-parented `<b>bold</b>`, the row
-structure, the `<b>` around the trailing text — matches. Written up at the
-SCOPE CUT comment in `htmldom.core`, and measured by
-`:table/foster-parent-unclosed-formatting`.
-`:omission/table-closes-p-through-inline` joined it when the reconstruction
-fix below removed its *first* divergence and left this one behind: the
-`<table>` is now the sibling a browser makes it, and what is left is the
-`<b>` around the cell's text. So this cause is what the `omission` group's
-last failure is, not an omission problem at all.
-
-**3. Individually rare spec behaviours (4 cases).** `</br>` is treated as
+**2. Individually rare spec behaviours (4 cases).** `</br>` is treated as
 `<br>`; `<a>` inside `<a>` closes the outer one (the `a`/`nobr` special
 case, listed as deferred in the namespace commentary); `<body>` in flow
 content is ignored (there is no html/head/body model at all — an L3
@@ -179,7 +164,46 @@ on cause 2 instead; the deliberate table exemption and the adoption agency's
 own tests were unaffected, which is what
 `:fmt/xmp-still-reconstructs` and the seven new unit tests exist to keep true.
 
-Deliberately **not** fixed: everything in the three causes above, plus the
+**The list of active formatting elements had no scope markers.** The spec
+pushes a marker when it opens a `td`/`th`/`caption`, and reconstruction
+never walks back past one; closing the element clears the list back to it.
+Without markers, formatting still open when a table started was recreated
+inside the first cell (`<table><b>bold<tr><td>x` gave `<b>x</b>` where a
+browser gives a bare `#text "x"`), and formatting opened *inside* a cell
+leaked into the next cell and out past the table.
+
+Both halves were measured, and the second is the one that constrains the
+implementation: `<b>a<table><tr><td><i>b</td><td>c</table>d` puts `<i>b</i>`
+in the first cell, a bare `#text "c"` in the second, and `#text "d"` inside
+the `<b>` but *not* inside an `<i>`. So clearing is neither "empty the list"
+nor "keep everything" — it cuts at the marker, dropping what was pushed
+after it and keeping what was pushed before. That case is in the corpus
+(`:table/clearing-keeps-formatting-from-before-the-marker`) precisely
+because a marker that gets the forward half right can still fail it.
+
+The awkward part was never the algorithm, it was that a cell can be popped
+from four places (`auto-close-stack` on a sibling cell,
+`clear-to-table-context`, `close-open-table-for-nested-table`, and the
+`:end` case) and none of them sees the afe list — the earlier SCOPE CUT
+comment sized this as "threading markers through" all of it. It is not
+threaded: a marker carries the id of the element that pushed it and stays
+live exactly as long as that id is on the stack of open elements, so
+"clear up to the last marker" falls out of a prune the next read performs.
+That is the same move the foster-parenting work made, reading the answer
+off the stack of open elements instead of off insertion modes this parser
+does not have.
+
+The spec's `applet`/`marquee`/`object`/`template` markers are **not**
+implemented, and that is a measurement statement rather than a shortcut:
+all four reconstruct *before* inserting themselves, which puts the
+formatting element back on the stack, after which every reconstruction
+inside them is a no-op with or without a marker — no probe distinguishes
+them. `table` 20/21 → 25/25, `omission` 10/11 → 11/11, overall 109/118 →
+111/118 before the four cases added with it. One unit test moved: it had
+asserted `[:td [:b "x"]]` while its own comment said Brave gives a bare
+`#text "x"`, so it now asserts the measurement it named.
+
+Deliberately **not** fixed: everything in the two causes above, plus the
 one attribute divergence — `@click="f"` becomes `click="f"`, because
 `attrs`' name pattern requires an ASCII-alpha/`_`/`:` first character while
 the spec forbids only whitespace, `/`, `>` and `=` in an attribute name.

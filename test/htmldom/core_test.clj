@@ -1856,13 +1856,17 @@
   ;; arrives if nothing popped it. Brave: <b>bold</b>, then the table with
   ;; its rows, then a fresh <b> around the trailing text.
   ;;
-  ;; The <b> around the cell's own "x" is this parser's documented scope
-  ;; cut, not the browser's answer (Brave gives a bare #text "x"): there
-  ;; are no scope MARKERS in the list of active formatting elements, so
-  ;; formatting still open when the table started is reconstructed on
-  ;; entry to the first cell. See the SCOPE CUT comment in htmldom.core.
+  ;; The cell's own "x" is now a bare text node, which is Brave's answer.
+  ;; It used to be `[:td [:b "x"]]` here, asserted as this parser's
+  ;; documented scope cut rather than as correct behaviour: with no scope
+  ;; MARKERS in the list of active formatting elements, formatting still
+  ;; open when the table started was reconstructed on entry to the first
+  ;; cell. `afe-marker-tags` closed that -- the <td> now pushes a marker
+  ;; and reconstruction stops there -- so the expectation moves to the
+  ;; measurement it was always compared against, and the SCOPE CUT comment
+  ;; it referred to is gone from htmldom.core.
   (is (= [[:b "bold"]
-          [:table [:tbody [:tr [:td [:b "x"]]]]]
+          [:table [:tbody [:tr [:td "x"]]]]
           [:b "y"]]
          (parsed-shape "<table><b>bold<tr><td>x</td></tr></table>y")))
   ;; The same shape with the element closed matches Brave exactly, because

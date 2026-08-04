@@ -95,6 +95,33 @@
   :group :table
   :html "<table><b>bold<tr><td>x</td></tr></table>y"}
 
+ ;; The scope marker a cell pushes, measured from both sides. Forward: the
+ ;; still-open <b> is foster-parented out but not recreated inside the
+ ;; cell. Backward ("clear the list of active formatting elements up to the
+ ;; last marker"): formatting opened INSIDE a cell does not leak into the
+ ;; next cell or out past the table, and both of those cells are closed
+ ;; implicitly, which is the path with no end tag to hang the clearing on.
+ ;; The last case pins the marker's POSITION -- <b> is pushed before the
+ ;; table and <i> inside the first cell, so clearing must drop the <i> and
+ ;; keep the <b>; a marker that empties the list or keeps everything fails
+ ;; one half each.
+
+ {:id :table/caption-blocks-outside-formatting
+  :group :table
+  :html "<table><b>bold<caption>cap</caption><tr><td>x"}
+
+ {:id :table/cell-close-clears-formatting-opened-inside
+  :group :table
+  :html "<table><tr><td><b>in<td>next"}
+
+ {:id :table/table-close-clears-formatting-opened-in-a-cell
+  :group :table
+  :html "<table><tr><td><b>in</td></tr></table>after"}
+
+ {:id :table/clearing-keeps-formatting-from-before-the-marker
+  :group :table
+  :html "<b>a<table><tr><td><i>b</td><td>c</table>d"}
+
  {:id :table/hidden-input-stays-in-the-table
   :group :table
   :html "<table><input type=\"hidden\"><tr><td>x</td></tr></table>"}
