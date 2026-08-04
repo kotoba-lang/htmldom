@@ -217,6 +217,25 @@
   :group :formatting
   :html "<p>a</b>b</p>"}
 
+ ;; Which START TAGS take the "reconstruct the active formatting elements"
+ ;; step. After the `</div>` the <em> is in the active formatting list but
+ ;; off the stack of open elements, so a tag that reconstructs lands INSIDE
+ ;; a reopened <em> and one that does not stays a sibling at depth 0 --
+ ;; which makes these the discriminator for `no-reconstruct-start-tags`.
+ ;; The two below are the COUNTEREXAMPLES: <xmp> closes a <p> exactly like
+ ;; the <pre>/<listing> rule beside it and <button> closes a button, yet
+ ;; both spec rules list the reconstruct step and a browser takes it. They
+ ;; are here so that over-applying the exemption to "everything that closes
+ ;; something" is a measured failure rather than an invisible one.
+
+ {:id :fmt/xmp-still-reconstructs
+  :group :formatting
+  :html "<div><em>x</div><xmp>y</xmp>z"}
+
+ {:id :fmt/button-still-reconstructs
+  :group :formatting
+  :html "<div><em>x</div><button>y</button>z"}
+
  ;; ---- raw text and RCDATA ----------------------------------------------
 
  {:id :raw/script-with-markup
@@ -515,6 +534,25 @@
  {:id :omission/dd-closes-dt-through-inline
   :group :omission
   :html "<dl><dt>term <b>bold <dd>definition</dl>"}
+
+ ;; The other half of the same rule: a block start tag does not reopen the
+ ;; formatting element, but the TEXT inside it does (a character token
+ ;; always reconstructs), so the <em> reappears inside the <li> and once
+ ;; more after the list. Suppressing reconstruction too broadly would look
+ ;; identical at the <ul> and only diverge here. And it is not a one-shot
+ ;; suppression: a run of blocks each gets its own reopened copy.
+
+ {:id :omission/block-does-not-reopen-formatting-but-text-does
+  :group :omission
+  :html "<div><em>x</div><ul><li>y</li></ul>z"}
+
+ {:id :omission/each-block-in-a-run-reopens-formatting
+  :group :omission
+  :html "<p>a <em>b <div>c</div><div>d</div> e</p>"}
+
+ {:id :omission/hr-does-not-reopen-formatting
+  :group :omission
+  :html "<div><em>x</div><hr>y"}
 
  ;; The bound on that same walk: it passes THROUGH formatting elements but
  ;; stops at other special elements, so a nested list does not let a new

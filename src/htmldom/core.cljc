@@ -1402,6 +1402,92 @@
                   [new-id document] (insert-element-for-token document stack old-id)]
               (recur document (conj stack new-id) (assoc v i new-id) (inc i)))))))))
 
+(def ^:private no-reconstruct-start-tags
+  "Start tags whose \"in body\" rule does NOT include the \"reconstruct the
+   active formatting elements\" step.
+
+   Reconstruction is the default -- character tokens take it, and so does
+   the \"any other start tag\" rule that catches everything unrecognised --
+   but a large minority of start tags carry their own in-body rule, and
+   those rules simply do not list the step. Taking it anyway nests the new
+   element inside a formatting element the browser leaves closed:
+   `<p>lead <em>emph <ul>` reopened the `<em>` and put the `<ul>` inside
+   it, where a browser makes the `<ul>` a sibling at depth 0 and reopens
+   the `<em>` only for the TEXT inside the list -- which is a character
+   token, so it reconstructs, and the `:text` case above still does.
+
+   MEASURED tag by tag in Brave 151, not read off the prose, with
+   `<div><em>x</div><TAG>`: after the `</div>` the `<em>` is in the list of
+   active formatting elements but off the stack of open elements, so
+   whether the next start tag reconstructs is directly visible -- a
+   reconstructing tag lands INSIDE a freshly reopened `<em>`, a
+   non-reconstructing one stays a sibling at depth 0. 93 tags were probed:
+   58 came back as siblings and are below (`h3`/`h4`/`h5` are folded in
+   with the `h1`/`h2`/`h6` that were probed, sharing one spec rule, which
+   is what makes the set 61); 25 came back nested and are deliberately
+   absent; 10 produced an empty tree, which is the next paragraph.
+
+   The rule is NOT \"the tags that close an open `<p>`\", in BOTH
+   directions -- which is why this is its own set rather than a reuse of
+   `auto-close-tags`' `:p` entry:
+
+     - WIDER. `li`/`dd`/`dt` do close a p, but through their own rules
+       rather than that entry. And `textarea`, `iframe`,
+       `noembed`/`noframes`/`noscript`, `plaintext`,
+       `param`/`source`/`track`, `rb`/`rt`/`rp`/`rtc` and the head-ish
+       elements (`base`, `basefont`, `bgsound`, `link`, `meta`, `script`,
+       `style`, `template`, `title`) do not close a p at all, and not one
+       of them reconstructs.
+     - NARROWER. `xmp` closes a p AND reconstructs -- measured, and the
+       spec agrees: its rule lists the step explicitly, unlike the
+       `pre`/`listing` rule right next to it. `button` is the same shape
+       for the button it closes. Both are absent below, so both keep the
+       reconstruction they are supposed to have, and both already matched
+       the browser before this set existed.
+
+   Deliberately NOT here, though a browser never reconstructs for them
+   either: the table-structure tags (`caption`, `colgroup`, `col`,
+   `tbody`/`thead`/`tfoot`, `tr`, `td`, `th`) and the document-structure
+   tags (`html`, `head`, `body`, `frameset`, `frame`). In table context the
+   first group is already exempt via `inserted-by-table-mode?`, which
+   carries its own measured evidence. OUTSIDE table context a browser
+   IGNORES both groups entirely -- the probe returned an empty tree, which
+   measures \"the token was dropped\", not \"reconstruction was skipped\" --
+   so there is no oracle for what this parser, which does insert them,
+   should do instead. That is a separate and still unmeasured gap
+   (`:misc/body-tag-in-flow` is its corpus witness); it is left alone
+   rather than guessed at.
+
+   `noscript` is measured with scripting ENABLED, which is what the oracle
+   runs. With scripting disabled its in-body rule is \"any other start
+   tag\", which does reconstruct. This parser has no scripting flag, so it
+   follows the oracle."
+  #{:address :article :aside :base :basefont :bgsound :blockquote :center
+    :dd :details :dialog :dir :div :dl :dt :fieldset :figcaption :figure
+    :footer :form :h1 :h2 :h3 :h4 :h5 :h6 :header :hgroup :hr :iframe :li
+    :link :listing :main :menu :meta :nav :noembed :noframes :noscript :ol
+    :p :param :plaintext :pre :rb :rp :rt :rtc :script :search :section
+    :source :style :summary :table :template :textarea :title :track :ul})
+
+(defn- start-tag-reconstructs?
+  "Whether the \"reconstruct the active formatting elements\" step runs
+   before this start tag is inserted. It is the default, and both
+   exemptions this parser carries are subtracted here:
+
+     - a CONTEXT rule -- the table insertion modes never take the step
+       (`inserted-by-table-mode?`);
+     - a TAG rule -- neither do the in-body start tags with their own
+       non-reconstructing rule (`no-reconstruct-start-tags`).
+
+   The two overlap on `form`/`script`/`style`/`template` and are kept
+   separate anyway: they answer different questions, they were measured
+   independently, and folding them together would put table-structure tags
+   under a rule whose evidence does not cover them (see the second set's
+   docstring)."
+  [document stack tag-kw]
+  (not (or (inserted-by-table-mode? document stack tag-kw)
+           (contains? no-reconstruct-start-tags tag-kw))))
+
 (defn- adoption-agency
   "WHATWG §13.2.6.4.7 adoption agency algorithm for an end tag whose tag name
   is `subject` (a formatting element). Handles mis-nested formatting.
@@ -1523,11 +1609,13 @@
                 ;; Reconstruct active formatting elements before inserting any
                 ;; new element (WHATWG in-body), so mis-nested formatting that
                 ;; was implicitly closed reopens around the new element --
-                ;; unless the table insertion modes own this tag, which never
-                ;; take that step (see `inserted-by-table-mode?`).
-                [document stack afe] (if (inserted-by-table-mode? document stack tag-kw)
-                                       [document stack afe]
-                                       (reconstruct-active-formatting document stack afe))
+                ;; unless this start tag is one of the ones that never take
+                ;; that step, either because the table insertion modes own it
+                ;; or because its own in-body rule omits it (see
+                ;; `start-tag-reconstructs?`).
+                [document stack afe] (if (start-tag-reconstructs? document stack tag-kw)
+                                       (reconstruct-active-formatting document stack afe)
+                                       [document stack afe])
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)

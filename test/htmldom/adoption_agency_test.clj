@@ -71,6 +71,81 @@
   (is (= [[:b [:i "a"]] [:i "cd"]]
          (shape "<b><i>a</b>cd</i>"))))
 
+;; ------------------------------------------------------------
+;; Which START TAGS take the "reconstruct the active formatting elements"
+;; step (`no-reconstruct-start-tags` / `start-tag-reconstructs?`).
+;;
+;; Every expected tree below was measured in Brave 151 through the
+;; conformance harness's own transport, with the probe shape
+;; `<div><em>x</div><TAG>`: after the `</div>` the <em> is in the active
+;; formatting list but off the stack, so a reconstructing tag lands INSIDE
+;; a reopened <em> and a non-reconstructing one stays a sibling.
+
+(deftest block-start-tag-does-not-reopen-formatting-but-its-text-does
+  ;; The bug this set exists for. <p>lead <em>emph <ul> reconstructed the
+  ;; <em> and nested the <ul> inside it; a browser makes the <ul> a sibling
+  ;; at depth 0 and reopens the <em> only for the TEXT in the list -- a
+  ;; character token, which does still reconstruct. Both halves are
+  ;; asserted here because getting the first right by suppressing the
+  ;; second would look identical at the <ul>.
+  (is (= [[:p "lead " [:em "emph "]]
+          [:ul [:li [:em "item"]]]
+          [:em " tail"] " done" [:p]]
+         (shape "<p>lead <em>emph <ul><li>item</li></ul> tail</em> done</p>"))))
+
+(deftest each-block-in-a-run-reopens-formatting-separately
+  ;; Not a one-shot suppression: the formatting element stays in the list,
+  ;; so every block in a row gets its own reopened copy around its own
+  ;; text, and the trailing text gets one more.
+  (is (= [[:p "a " [:em "b "]]
+          [:div [:em "c"]]
+          [:div [:em "d"]]
+          [:em " e" [:p]]]
+         (shape "<p>a <em>b <div>c</div><div>d</div> e</p>"))))
+
+(deftest nested-blocks-reopen-formatting-only-at-the-text
+  ;; The reopened element appears where the character token is, not at
+  ;; every block boundary on the way in.
+  (is (= [[:div [:em "x"]] [:div [:div [:em "y"]]] [:em "z"]]
+         (shape "<div><em>x</div><div><div>y</div></div>z"))))
+
+(deftest li-and-dd-do-not-reopen-formatting
+  ;; WIDER than "the tags that close a <p>": li/dd/dt reach a p through
+  ;; their own rules, not `auto-close-tags`' :p entry, and none of the
+  ;; three reconstructs.
+  (is (= [[:ul [:li "a " [:em "b "]] [:li [:em "c"]]]]
+         (shape "<ul><li>a <em>b <li>c</li></ul>")))
+  (is (= [[:dl [:dt "term " [:b "bold "]] [:dd [:b "definition"]]]]
+         (shape "<dl><dt>term <b>bold <dd>definition</dl>"))))
+
+(deftest void-and-head-tags-do-not-reopen-formatting
+  ;; Also wider: <hr> closes a p, <link> does not, and neither takes the
+  ;; step. The <em> reappears at the following text in both.
+  (is (= [[:div [:em "x"]] [:hr] [:em "y"]]
+         (shape "<div><em>x</div><hr>y")))
+  (is (= [[:div [:em "x"]] [:link] [:em "y"]]
+         (shape "<div><em>x</div><link>y"))))
+
+(deftest xmp-and-button-still-reopen-formatting
+  ;; NARROWER, and the guard against over-applying the set. <xmp> closes a
+  ;; <p> exactly like the <pre>/<listing> rule beside it, yet its spec rule
+  ;; lists the reconstruct step and a browser takes it -- measured. <button>
+  ;; is the same shape for the button it closes. Both must keep
+  ;; reconstructing, so both are deliberately absent from
+  ;; `no-reconstruct-start-tags`.
+  (is (= [[:div [:em "x"]] [:em [:xmp "y"] "z"]]
+         (shape "<div><em>x</div><xmp>y</xmp>z")))
+  (is (= [[:div [:em "x"]] [:em [:button "y"] "z"]]
+         (shape "<div><em>x</div><button>y</button>z"))))
+
+(deftest unrecognised-and-phrasing-start-tags-still-reopen-formatting
+  ;; The "any other start tag" rule, which is what makes reconstruction the
+  ;; DEFAULT: an unknown element and a <span> both reopen the <em>.
+  (is (= [[:div [:em "x"]] [:em [:span "y"]]]
+         (shape "<div><em>x</div><span>y</span>")))
+  (is (= [[:div [:em "x"]] [:em [:widget "y"]]]
+         (shape "<div><em>x</div><widget>y</widget>"))))
+
 (deftest furthest-block-fallback-is-naive-nesting
   ;; L2 documented limitation, locked here so a future L3 reparenting
   ;; implementation is an intentional change, not a silent one. <b><p>x</b>
