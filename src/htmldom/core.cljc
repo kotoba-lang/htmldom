@@ -182,6 +182,35 @@
                           :else cp))))
     (catch #?(:clj Exception :cljs :default) _ nil)))
 
+(def ^:private legacy-char-refs
+  "The named references HTML5 resolves WITHOUT a trailing semicolon.
+
+   The general rule really is ambiguous without the full table, and this
+   parser deliberately carries only a subset -- but the semicolon-less
+   forms are not part of that ambiguity: the spec fixes a CLOSED list of
+   ~106 legacy names (every one predating HTML5's named-reference table),
+   and resolves an unterminated reference by taking the LONGEST match from
+   that list alone. `&notit;` is therefore not undecidable; it is `not`
+   (U+00AC) followed by the literal text `it;`, because `notin` and
+   `notit` are not on the list.
+
+   This map holds the legacy names that are also in `named-char-refs`, so
+   nothing here can resolve to a character the terminated form would not.
+   A name NOT on this list still requires its semicolon -- `&middot`
+   without one stays literal, exactly as a browser leaves it.
+
+   Measured in Brave before implementing: `<p>a&ampb</p>` is `a&b`, and
+   `<a href=\"?x=1&ampy=2\">` keeps `&ampy=2` literal -- see
+   `decode-entities`' `in-attribute?` for that second half."
+  (select-keys named-char-refs
+               ["amp" "lt" "gt" "quot" "nbsp" "copy" "reg" "not" "deg"
+                "para" "sect" "micro" "middot" "pound" "yen" "cent"
+                "plusmn" "times" "divide" "frac12" "sup2" "sup3"
+                "laquo" "raquo" "ordm" "shy"]))
+
+(def ^:private legacy-max-len
+  (reduce max 0 (map count (keys legacy-char-refs))))
+
 (def ^:private char-ref-pattern
   ;; Named references require the trailing `;` (see decode-entities'
   ;; docstring for why). Numeric references' trailing `;` is optional: unlike
@@ -205,18 +234,43 @@
    digits naming an invalid codepoint -- is left as literal, unmodified text
    rather than guessed at, matching this project's degrade-don't-guess
    convention."
-  [s]
-  (if (or (nil? s) (not (str/index-of s "&")))
-    s
-    (str/replace
+  ([s] (decode-entities s false))
+  ([s in-attribute?]
+   (if (or (nil? s) (not (str/index-of s "&")))
      s
-     char-ref-pattern
-     (fn [[whole named decimal hex]]
-       (or (cond
-             named (get named-char-refs named)
-             decimal (numeric-char-ref->str decimal 10)
-             hex (numeric-char-ref->str hex 16))
-           whole)))))
+     (let [terminated (str/replace
+                       s
+                       char-ref-pattern
+                       (fn [[whole named decimal hex]]
+                         (or (cond
+                               named (get named-char-refs named)
+                               decimal (numeric-char-ref->str decimal 10)
+                               hex (numeric-char-ref->str hex 16))
+                             whole)))]
+       ;; Then the semicolon-less LEGACY forms, longest match first (see
+       ;; legacy-char-refs). Run second so a terminated reference is never
+       ;; shortened: `&amp;` is already `&` by now and cannot be re-read.
+       ;;
+       ;; In an ATTRIBUTE the same input is left alone when the character
+       ;; after the match is alphanumeric or `=`. That is a real rule with
+       ;; a real purpose -- it is why `?x=1&ampy=2` survives in a URL --
+       ;; and it is why this takes an `in-attribute?` flag rather than
+       ;; being applied uniformly.
+       (str/replace
+        terminated
+        #"&([a-zA-Z][a-zA-Z0-9]*)"
+        (fn [[whole name]]
+          (or (loop [n (min legacy-max-len (count name))]
+                (when (pos? n)
+                  (let [head (subs name 0 n)
+                        rest-of (subs name n)]
+                    (if-let [ch (get legacy-char-refs head)]
+                      (when-not (and in-attribute?
+                                     (or (str/starts-with? rest-of "=")
+                                         (re-find #"^[a-zA-Z0-9]" rest-of)))
+                        (str ch rest-of))
+                      (recur (dec n))))))
+              whole)))))))
 
 (defn- attrs
   [s]
@@ -224,7 +278,7 @@
        (map (fn [[_ k dq sq bare]]
               [(keyword (str/lower-case k))
                (if-let [v (or dq sq bare)]
-                 (decode-entities v)
+                 (decode-entities v true)
                  ;; Real WHATWG HTML tokenization: a valueless/bare
                  ;; attribute (`<input checked>`, no `=value` at all) has
                  ;; its value set to the empty string "" -- that's what

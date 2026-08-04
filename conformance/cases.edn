@@ -595,4 +595,87 @@
 
  {:id :omission/p-in-cell-closed-normally
   :group :omission
-  :html "<table><tr><td><p>a<div>b</div></td></tr></table>"}]
+  :html "<table><tr><td><p>a<div>b</div></td></tr></table>"}
+
+ ;; ---- foreign content, template, and tokenizer rules with no coverage ---
+ ;;
+ ;; Groups the corpus did not have at all (svg/math/template) plus spec
+ ;; rules it never exercised. Added 2026-08-04 to find out what the 97%
+ ;; was NOT measuring; several of these are expected to fail.
+
+ {:id :foreign/svg-basic
+  :group :foreign
+  :html "<div><svg><circle cx=\"5\" cy=\"5\" r=\"4\"></circle></svg></div>"}
+
+ {:id :foreign/svg-self-closing-is-allowed
+  :group :foreign
+  ;; In foreign content a trailing slash really does close the element,
+  ;; unlike in HTML where it is ignored on non-void tags.
+  :html "<div><svg><rect/><circle/></svg>after</div>"}
+
+ {:id :foreign/svg-camel-case-attribute
+  :group :foreign
+  ;; viewBox keeps its capital B in foreign content; HTML lowercases.
+  :html "<svg viewBox=\"0 0 10 10\"><path d=\"M0 0\"></path></svg>"}
+
+ {:id :foreign/math-basic
+  :group :foreign
+  :html "<math><mi>x</mi><mo>+</mo><mi>y</mi></math>"}
+
+ {:id :foreign/svg-breakout-on-html-tag
+  :group :foreign
+  ;; A <p> inside <svg> breaks OUT of foreign content per the spec's
+  ;; breakout list.
+  :html "<svg><circle></circle><p>out</p></svg>"}
+
+ {:id :template/content-is-not-a-child
+  :group :template
+  ;; A template's content lives in a separate document fragment, so the
+  ;; template element itself reports no element children.
+  :html "<div><template><p>inside</p></template><p>after</p></div>"}
+
+ {:id :template/in-a-table
+  :group :template
+  ;; A template inside a table is NOT foster-parented out of it.
+  :html "<table><template><td>x</td></template></table>"}
+
+ {:id :entity/no-semicolon-in-text
+  :group :entity
+  ;; In text, a semicolon-less named reference still resolves if it is one
+  ;; of the legacy names.
+  :html "<p>a&ampb</p>"}
+
+ {:id :entity/no-semicolon-in-attribute
+  :group :entity
+  ;; In an ATTRIBUTE the same input does NOT resolve when followed by an
+  ;; alphanumeric or '=' -- a different rule from text, and the reason
+  ;; query strings survive.
+  :html "<a href=\"?x=1&ampy=2\">q</a>"}
+
+ {:id :entity/numeric-decimal-and-hex
+  :group :entity
+  :html "<p>&#65;&#x42;&#x43;</p>"}
+
+ {:id :entity/numeric-null-becomes-replacement
+  :group :entity
+  ;; &#0; is a parse error and becomes U+FFFD.
+  :html "<p>x&#0;y</p>"}
+
+ {:id :ws/newline-after-pre-is-dropped
+  :group :ws
+  ;; A newline IMMEDIATELY after <pre> is discarded by the parser, not by
+  ;; CSS -- so the text node starts at 'line one'.
+  :html "<pre>\nline one\nline two</pre>"}
+
+ {:id :ws/newline-after-textarea-is-dropped
+  :group :ws
+  :html "<textarea>\nvalue</textarea>"}
+
+ {:id :attr/duplicate-attribute-keeps-the-first
+  :group :attr
+  :html "<div id=\"first\" id=\"second\">x</div>"}
+
+ {:id :form/optgroup-and-option-nesting
+  :group :form
+  :html "<select><optgroup label=\"g1\"><option>a<option>b</optgroup><optgroup label=\"g2\"><option>c</select>"}
+]
