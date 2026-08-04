@@ -1,5 +1,10 @@
 {:paths ["src"]
- :deps {io.github.kotoba-lang/dom-gpu {:local/root "../dom-gpu"}}
+ :deps {io.github.kotoba-lang/dom-gpu {:local/root "../dom-gpu"}
+        ;; An inline `style="..."` attribute is a CSS declaration block, so
+        ;; cssom parses it -- see the "inline style" section comment in
+        ;; src/htmldom/core.cljc. cssom does not depend on this repo, so
+        ;; there is no cycle.
+        io.github.kotoba-lang/cssom {:local/root "../cssom"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

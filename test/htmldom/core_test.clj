@@ -38,7 +38,16 @@
   ;; not merely "importance ignored", it's a genuinely corrupted value that
   ;; silently fails to parse and falls back to that property's own
   ;; unstyled/transparent default -- a real, visible rendering bug.
-  (is (= {:color "red" :padding 4}
+  ;; The `padding` half of the expected map gained its four per-side
+  ;; longhands when inline-style parsing moved to `cssom.core` (this test
+  ;; had only ever pinned "one key in, one key out" incidentally -- it is
+  ;; about `!important` stripping, not about shorthand expansion). A
+  ;; stylesheet's `padding: 4px` had produced all five keys for some time;
+  ;; an inline one produced only `:padding`, and this engine's box model
+  ;; reads the longhands, which is why the difference was visible against a
+  ;; real browser.
+  (is (= {:color "red" :padding 4
+          :padding-top 4 :padding-right 4 :padding-bottom 4 :padding-left 4}
          (html/parse-style "color: red !important; padding: 4px")))
   (is (= {:color "red"} (html/parse-style "color: red!important"))
       "no space before !important must still strip cleanly")
@@ -47,7 +56,12 @@
 
 (deftest style-importance-reports-which-properties-were-marked-important
   (is (= #{:color} (html/style-importance "color: red !important; padding: 4px")))
-  (is (= #{:color :padding} (html/style-importance "color: red !important; padding: 4px !important")))
+  ;; An `!important` shorthand marks every longhand it expands into, which
+  ;; is both what real CSS does and what this engine needs: the cascade
+  ;; ranks the longhands, so marking only `:padding` would let an ordinary
+  ;; rule-based `padding-left` beat an `!important` inline `padding`.
+  (is (= #{:color :padding :padding-top :padding-right :padding-bottom :padding-left}
+         (html/style-importance "color: red !important; padding: 4px !important")))
   (is (= #{} (html/style-importance "color: red; padding: 4px"))
       "no !important anywhere -> empty set, not nil"))
 
@@ -57,8 +71,12 @@
         root (dom/node document (:root document))
         main (dom/node document (first (:children root)))
         p (dom/node document (first (:children main)))]
-    (is (= {:color "red" :padding 4} (get-in p [:attrs :style-inline]))
-        "the real value, not the corrupted \"red !important\" string")
+    (is (= {:color "red" :padding 4
+            :padding-top 4 :padding-right 4 :padding-bottom 4 :padding-left 4}
+           (get-in p [:attrs :style-inline]))
+        "the real value, not the corrupted \"red !important\" string (the
+         four per-side padding longhands arrived with the move to cssom's
+         declaration parser -- see the sibling !important test)")
     (is (= #{:color} (get-in p [:attrs :style-inline-important])))
     (is (= "red" (get-in p [:attrs :style/color]))
         "the resolved :style/* attr real paint code reads must also be uncorrupted")))
@@ -96,6 +114,48 @@
 (deftest inline-style-border-longhands-declared-separately-are-unaffected
   (is (= {:border-width 2 :border-color "#00ff00"}
          (html/parse-style "border-width: 2px; border-color: #00ff00"))))
+
+;; ---- inline style `margin`/`padding` shorthand expansion ----
+;;
+;; The drift that motivated moving inline-style parsing to cssom.core: a
+;; stylesheet's `padding: 12px` had expanded into the four per-side
+;; longhands this engine's box model actually reads for some time, while an
+;; inline `style="padding: 12px"` -- parsed by this repo's own separate copy
+;; of the declaration parser -- produced only the uniform `:padding` key,
+;; and `style="margin: 4px 8px"` produced the raw STRING "4px 8px", which
+;; the per-side box model cannot read at all. Reproduced through the real
+;; pipeline and measured against a headless Blink by kotoba-lang/cssom's
+;; conformance harness before the fix.
+
+(deftest inline-style-padding-shorthand-expands-into-its-four-side-longhands
+  (is (= {:padding 12 :padding-top 12 :padding-right 12
+          :padding-bottom 12 :padding-left 12}
+         (html/parse-style "padding: 12px"))))
+
+(deftest inline-style-margin-shorthand-follows-real-css-one-to-four-value-rule
+  (is (= {:margin 4 :margin-top 4 :margin-right 8 :margin-bottom 4 :margin-left 8}
+         (html/parse-style "margin: 4px 8px"))
+      "two values are vertical/horizontal -- never a raw \"4px 8px\" string")
+  (is (= {:margin 1 :margin-top 1 :margin-right 2 :margin-bottom 3 :margin-left 2}
+         (html/parse-style "margin: 1px 2px 3px"))
+      "three values are top/horizontal/bottom")
+  (is (= {:margin 1 :margin-top 1 :margin-right 2 :margin-bottom 3 :margin-left 4}
+         (html/parse-style "margin: 1px 2px 3px 4px"))
+      "four values are clockwise from the top"))
+
+(deftest inline-style-box-shorthand-this-engine-cannot-resolve-stays-unexpanded
+  (is (= {:margin "0 auto"} (html/parse-style "margin: 0 auto"))
+      "`auto` needs real layout against the container -- degrade, don't
+       guess a number for the horizontal sides")
+  (is (= {:padding "10%"} (html/parse-style "padding: 10%"))))
+
+(deftest inline-style-padding-shorthand-through-the-full-document-parse
+  ;; The end-to-end shape the box model actually reads, not just
+  ;; parse-style in isolation.
+  (let [document (html/parse-into-document "<div style=\"padding: 12px\">x</div>")
+        div (first (filter #(= :div (:tag %)) (vals (:nodes document))))]
+    (is (= 12 (get-in div [:attrs :style/padding-left])))
+    (is (= 12 (get-in div [:attrs :style/padding-top])))))
 
 ;; ---- inline style `text-shadow` shorthand expansion ----
 
