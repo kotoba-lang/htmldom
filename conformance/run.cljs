@@ -50,8 +50,14 @@
             [kotoba.wasm.dom :as dom]))
 
 (def browser-candidates
-  ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-   "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+  ;; Brave first: it is the named comparison target, and this list had
+  ;; Chrome ahead of it while the ns docstring said Brave -- so the harness
+  ;; reported "oracle: Chrome" every run and no one had to be told a
+  ;; fallback happened, because none did. Same engine either way (verified
+  ;; in the sibling cssom harness: Brave and Chrome produce byte-identical
+  ;; measurements over CDP), but the run should measure what it claims to.
+  ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
    "/Applications/Brave Browser Beta.app/Contents/MacOS/Brave Browser Beta"
    "/Applications/Chromium.app/Contents/MacOS/Chromium"])
 
@@ -150,7 +156,29 @@
          serialize-script
          "</script></body></html>")))
 
-(defn- run-browser!
+(defn- run-cdp!
+  "Reads the measurement block by driving the browser over the DevTools
+   protocol (conformance/cdp_dump.cljs, ported from the sibling cssom
+   harness along with the reason it exists).
+
+   Primary transport, not a fallback: Brave 151's `--dump-dom` produces
+   nothing at all -- zero bytes, no stderr, in every headless mode -- while
+   answering CDP normally, so a `--dump-dom`-only harness silently stops
+   measuring the browser it names and measures Chrome instead. That is what
+   this harness was doing until 2026-08-04. CDP is also far faster, because
+   it does not wait on a headless Chromium to exit, which it never does."
+  [browser file]
+  (let [out-file (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-htmldom-cdp-")) "block.html")
+        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljs" browser file out-file]
+                          #js {:encoding "utf8" :timeout 240000})
+        out (if (fs/existsSync out-file) (fs/readFileSync out-file "utf8") "")]
+    (when-not (str/includes? out "kotoba-htmldom-conformance-out")
+      (throw (ex-info "browser produced no measurement block over CDP"
+                      {:status (.-status res)
+                       :stderr (str/trim (or (.-stderr res) ""))})))
+    out))
+
+(defn- run-dump-dom!
   "Runs the corpus page in a real Blink browser and returns its serialised
    trees.
 
@@ -186,14 +214,34 @@
       (fs/rmSync profile #js {:recursive true :force true})
       (throw (ex-info "browser produced no measurement block"
                       {:status (.-status res) :bytes (count stdout)})))
-    (let [from (+ (str/index-of stdout marker) (count marker))
-          end (str/index-of stdout "</pre>" from)
-          parsed (-> (js/Buffer.from (subs stdout from end) "base64")
-                     (.toString "utf8")
-                     js/JSON.parse
-                     (js->clj :keywordize-keys true))]
-      (fs/rmSync profile #js {:recursive true :force true})
-      parsed)))
+    (fs/rmSync profile #js {:recursive true :force true})
+    stdout))
+
+(defn- parse-block
+  "Both transports hand back the same `<pre id=...>` shape, so there is one
+   parser for one format."
+  [raw]
+  (let [marker "kotoba-htmldom-conformance-out\">"
+        from (+ (str/index-of raw marker) (count marker))
+        end (str/index-of raw "</pre>" from)]
+    (-> (js/Buffer.from (subs raw from end) "base64")
+        (.toString "utf8")
+        js/JSON.parse
+        (js->clj :keywordize-keys true))))
+
+(defn- run-browser!
+  "CDP first, `--dump-dom` second: the two fail independently, and which one
+   produced the numbers is reported rather than assumed."
+  [browser file]
+  (try
+    {:transport :cdp :data (parse-block (run-cdp! browser file))}
+    (catch :default cdp-err
+      (try
+        {:transport :dump-dom :data (parse-block (run-dump-dom! browser file))}
+        (catch :default dump-err
+          (throw (ex-info (str "no measurement block: CDP -- " (ex-message cdp-err)
+                               "; --dump-dom -- " (ex-message dump-err))
+                          {:cdp (ex-data cdp-err) :dump-dom (ex-data dump-err)})))))))
 
 ;; ---- the htmldom side ----
 
@@ -445,20 +493,30 @@
       all-cases (edn/read-string (fs/readFileSync "conformance/cases.edn" "utf8"))
       cases (vec (if only (filter #(str/includes? (str (:id %)) only) all-cases) all-cases))
       _ (when (empty? cases) (throw (ex-info "no cases selected" {:only only})))
-      page (path/join (os/tmpdir) "htmldom-conformance-corpus.html")
+      ;; A per-run directory, not a fixed name in tmpdir. Two runs of this
+      ;; harness (or of the sibling cssom one, which had the identical bug)
+      ;; overlap routinely now that agents run them in parallel, and a
+      ;; shared path means run B overwrites the page run A is about to
+      ;; measure -- so A reads B's corpus through A's case indices and
+      ;; scores near-zero on everything. Observed exactly that: 3/190 lines
+      ;; and 0/750 boxes, with a box count from a corpus this run had never
+      ;; seen.
+      page (path/join (fs/mkdtempSync (path/join (os/tmpdir) "htmldom-conf-page-"))
+                      "corpus.html")
       _ (fs/writeFileSync page (corpus-page cases))
-      [browser oracle]
+      [browser transport oracle]
       (loop [[b & more] candidates failures []]
         (if (nil? b)
           (throw (ex-info "no candidate browser produced a measurement block"
                           {:tried failures}))
-          (let [r (try [b (run-browser! b page)]
+          (let [r (try (let [{:keys [transport data]} (run-browser! b page)]
+                         [b transport data])
                        (catch :default e
                          (println (str "oracle unusable: " b " -- " (ex-message e)))
                          nil))]
             (or r (recur more (conj failures b))))))
-      _ (println (str "\noracle:  " browser
-                      "\nmethod:  innerHTML fragment parse on a detached <div>, --headless=old --dump-dom"
+      _ (println (str "\noracle:  " browser " (" (name transport) ")"
+                      "\nmethod:  innerHTML fragment parse on a detached <div>"
                       "\ncases:   " (count cases) "\n"))
       results (vec (map-indexed
                     (fn [i c] (compare-case (get oracle (keyword (str "case-" i)) []) c))

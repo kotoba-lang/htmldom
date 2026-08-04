@@ -450,4 +450,54 @@
 
  {:id :misc/heading-siblings
   :group :misc
-  :html "<h1>A</h1><h2>B</h2><p>c</p>"}]
+  :html "<h1>A</h1><h2>B</h2><p>c</p>"}
+
+ ;; ---- tag omission ACROSS an open inline element -----------------------
+ ;;
+ ;; The half of the omission rules a stack-TOP-only check cannot express.
+ ;; HTML5 says "if the stack of open elements has a p element in button
+ ;; scope, close a p element" -- the <p> does not have to be innermost. An
+ ;; open <span> between the <p> and the incoming block element is popped
+ ;; along with it, and the text after the block lands OUTSIDE both.
+ ;;
+ ;; Measured in Brave before these cases were written, not derived from the
+ ;; prose: `<p>text <span>a <div>b</div> c</span> end</p>` gives a <p>
+ ;; holding "text " and a <span> holding "a ", a sibling <div>, then
+ ;; " c end" at top level -- and one EMPTY <p>, because a stray </p> with
+ ;; no p in button scope inserts one.
+
+ {:id :omission/div-closes-p-through-span
+  :group :omission
+  :html "<p>text <span>a <div>b</div> c</span> end</p>"}
+
+ {:id :omission/ul-closes-p-through-em
+  :group :omission
+  :html "<p>lead <em>emph <ul><li>item</li></ul> tail</em> done</p>"}
+
+ {:id :omission/table-closes-p-through-inline
+  :group :omission
+  :html "<p>before <b>bold <table><tr><td>cell</td></tr></table> after</b></p>"}
+
+ {:id :omission/li-closes-li-through-span
+  :group :omission
+  :html "<ul><li>one <span>x <li>two</span></ul>"}
+
+ {:id :omission/dd-closes-dt-through-inline
+  :group :omission
+  :html "<dl><dt>term <b>bold <dd>definition</dl>"}
+
+ ;; The bound on that same walk: it passes THROUGH formatting elements but
+ ;; stops at other special elements, so a nested list does not let a new
+ ;; <li> reach the outer one, and a <td> does not let a block reach a <p>
+ ;; outside the table.
+ {:id :omission/nested-list-bounds-the-walk
+  :group :omission
+  :html "<ul><li>one<ul><li>inner</li></ul><li>two</ul>"}
+
+ {:id :omission/table-cell-bounds-the-walk
+  :group :omission
+  :html "<p>outside<table><tr><td><div>in-cell</div></td></tr></table></p>"}
+
+ {:id :omission/p-in-cell-closed-normally
+  :group :omission
+  :html "<table><tr><td><p>a<div>b</div></td></tr></table>"}]
