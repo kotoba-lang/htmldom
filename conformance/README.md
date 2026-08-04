@@ -24,10 +24,11 @@ this is the parser's own equivalent, and the first run found two.
 
 ## Result
 
-**Tree shape: 102/113 = 90%.** The first run, on 2026-08-04 against the
+**Tree shape: 109/118 = 92%.** The first run, on 2026-08-04 against the
 unmodified parser, was 82/100 = 82%; the corpus has grown since, so the two
 numbers are not directly comparable — the map underneath them is the point.
-Per group:
+The most recent change (the reconstruction fix below) scored 102/113 → 104/113
+on the corpus as it stood, and added five cases with it. Per group:
 
 | group | | | |
 |---|---|---|---|
@@ -39,14 +40,14 @@ Per group:
 | rawtext | 9/9 | 100% | |
 | whitespace | 5/5 | 100% | |
 | table | 20/21 | 95% | after foster parenting; was 12/16 |
-| formatting | 10/11 | 91% | |
+| formatting | 12/13 | 92% | |
+| omission | 10/11 | 91% | after the reconstruction fix; was 5/8 |
 | entity | 7/8 | 88% | after the nbsp fix; was 6/8 |
 | misc | 4/5 | 80% | |
 | selfclose | 4/5 | 80% | |
-| **omission** | **5/8** | **63%** | one cause, see below |
 | **comment** | **1/4** | **25%** | structurally impossible today |
 
-**Attributes** (a secondary axis, see below): 303/304 comparable elements
+**Attributes** (a secondary axis, see below): 339/340 comparable elements
 carry exactly the browser's attribute map.
 
 82% on the first run was already higher than the repo's own framing would
@@ -54,9 +55,9 @@ predict, and that was a real finding: optional end tags, implied `<tbody>`,
 misnested formatting, raw text, entity decoding and attribute tokenization
 were in far better shape than "trusted subset only" suggests — the parser
 had quietly grown most of an in-body insertion mode. The remaining failures
-are not scattered; they are four causes.
+are not scattered; they are three causes.
 
-## The four causes, in order of size
+## The three causes, in order of size
 
 **1. Comments have no node type (3 cases).** `kotoba.wasm.dom` knows only
 `:element` and `:text`; `tokenize` therefore discards comments entirely.
@@ -65,22 +66,7 @@ which is why the harness special-cases the category (see
 `divergence-category`) instead of reporting the shifted text that follows.
 Fixing this needs a change in `kotoba-lang/dom-gpu`, not here.
 
-**2. "Reconstruct the active formatting elements" runs for every start tag
-(3 cases, the whole `omission` residual).** WHATWG runs that step for
-character tokens and for the "any other start tag" rule, but *not* for the
-block-level start tags that close an open `<p>` — `ul`, `table`, `dd` and
-the rest have their own "in body" rules, and none of them reconstructs.
-`parse-into-document` reconstructs unconditionally, so
-`<p>lead <em>emph <ul>` reopens the `<em>` and puts the `<ul>` inside it,
-where a browser makes the `<ul>` a sibling at depth 0 and only reopens the
-`<em>` for the text that follows the list. Measured in Brave for all three
-(`:omission/ul-closes-p-through-em`,
-`:omission/table-closes-p-through-inline`,
-`:omission/dd-closes-dt-through-inline`). The table insertion modes already
-carry the equivalent exemption — see `inserted-by-table-mode?` — so the
-shape of the fix is known; it is the in-body half that is missing.
-
-**3. No scope markers in the list of active formatting elements (1 case).**
+**2. No scope markers in the list of active formatting elements (2 cases).**
 The spec pushes a marker when it opens a `td`/`th`/`caption` (and an
 `applet`/`marquee`/`object`/`template`), and reconstruction never walks back
 past it. Without markers, formatting still open when a table starts is
@@ -90,8 +76,13 @@ else about that shape — the foster-parented `<b>bold</b>`, the row
 structure, the `<b>` around the trailing text — matches. Written up at the
 SCOPE CUT comment in `htmldom.core`, and measured by
 `:table/foster-parent-unclosed-formatting`.
+`:omission/table-closes-p-through-inline` joined it when the reconstruction
+fix below removed its *first* divergence and left this one behind: the
+`<table>` is now the sibling a browser makes it, and what is left is the
+`<b>` around the cell's text. So this cause is what the `omission` group's
+last failure is, not an omission problem at all.
 
-**4. Individually rare spec behaviours (4 cases).** `</br>` is treated as
+**3. Individually rare spec behaviours (4 cases).** `</br>` is treated as
 `<br>`; `<a>` inside `<a>` closes the outer one (the `a`/`nobr` special
 case, listed as deferred in the namespace commentary); `<body>` in flow
 content is ignored (there is no html/head/body model at all — an L3
@@ -145,7 +136,50 @@ implied `<tr>` as well as the implied `<tbody>`, and a `<table>` inside
 table context closes the open table rather than nesting. `table` 12/16 →
 20/21, with the one residual being cause 3 above.
 
-Deliberately **not** fixed: everything in the four causes above, plus the
+**"Reconstruct the active formatting elements" ran for every start tag.**
+WHATWG takes that step for character tokens and for the "any other start
+tag" rule, but a large minority of start tags carry their own "in body"
+rule and those rules do not list it. `parse-into-document` took it
+unconditionally, so `<p>lead <em>emph <ul>` reopened the `<em>` and nested
+the `<ul>` inside it, where a browser makes the `<ul>` a sibling at depth 0.
+The whole `omission` residual was this, and the table insertion modes
+already carried the equivalent exemption (`inserted-by-table-mode?`), so the
+shape of the fix was known.
+
+What was *not* known was the rule. The obvious reading — "the block-level
+tags that close an open `<p>`" — is wrong in both directions, and the
+difference was measured rather than argued: 93 tags were probed one at a
+time in Brave with `<div><em>x</div><TAG>`, a shape where the `<em>` is in
+the active formatting list but off the stack, so a reconstructing tag lands
+*inside* a reopened `<em>` and a non-reconstructing one stays a sibling. 58
+came back as siblings, 25 nested, and 10 produced an empty tree because the
+browser drops the token outright (`html`, `head`, `body`, `frameset`,
+`frame` and the stray table-structure tags — which is why those are *not* in
+the set: an ignored token measures nothing about reconstruction). The set is
+**wider** than the p-closing tags —
+`li`/`dd`/`dt` reach a `<p>` through their own rules rather than
+`auto-close-tags`' `:p` entry, and `textarea`, `iframe`, `noembed`,
+`plaintext`, `param`/`source`/`track`, `rb`/`rt`/`rp`/`rtc` and the head-ish
+elements do not close a `<p>` at all yet none of them reconstructs — and
+**narrower**, because `xmp` closes a `<p>` exactly like the `pre`/`listing`
+rule beside it and *does* reconstruct, as does `button` for the button it
+closes. Both counterexamples are now corpus cases
+(`:fmt/xmp-still-reconstructs`, `:fmt/button-still-reconstructs`) precisely
+so that widening the set later fails loudly.
+
+The other half of the rule is that a character token still reconstructs, so
+the formatting reappears *inside* the block, around its text, and again
+after it — `<div><em>x</div><ul><li>y</li></ul>z` is
+`<ul><li><em>y</em></li></ul><em>z</em>` in both. That is what makes
+over-suppressing invisible at the block and visible at the text, which is
+why it is its own case. `omission` 5/8 → 10/11 (three failures fixed, five
+cases added), overall 102/113 → 104/113 before the additions.
+`:omission/table-closes-p-through-inline` was one of the three and now fails
+on cause 2 instead; the deliberate table exemption and the adoption agency's
+own tests were unaffected, which is what
+`:fmt/xmp-still-reconstructs` and the seven new unit tests exist to keep true.
+
+Deliberately **not** fixed: everything in the three causes above, plus the
 one attribute divergence — `@click="f"` becomes `click="f"`, because
 `attrs`' name pattern requires an ASCII-alpha/`_`/`:` first character while
 the spec forbids only whitespace, `/`, `>` and `=` in an attribute name.
