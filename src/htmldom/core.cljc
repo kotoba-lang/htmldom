@@ -877,20 +877,86 @@
    :td #{:td :th :tr}
    :th #{:td :th :tr}})
 
+(def ^:private special-tags
+  "WHATWG's \"special\" category (13.2.4.2), minus the SVG/MathML members
+   this parser has no notion of.
+
+   It is what bounds a downward search of the stack of open elements. The
+   spec's own `<li>` loop reads: \"if node is in the special category, but
+   is not an address, div, or p element, then jump to the done step\" --
+   so the walk passes through FORMATTING and phrasing elements (`span`,
+   `em`, `b`, `code`) and through those three, and stops at everything
+   else.
+
+   Getting this wrong is not theoretical: a first attempt bounded the walk
+   by button SCOPE instead, which is the right bound for closing a `<p>`
+   but far too permissive for `<li>` -- `<ul><li>one<ul><li>inner` then
+   closed the OUTER `<li>` from inside the nested list, because a `<ul>`
+   is not a scope boundary. Two existing tests
+   (`li-auto-close-does-not-reach-past-a-nested-list`,
+   `dt-dd-auto-close-does-not-reach-past-a-nested-dl`) caught it
+   immediately, which is what they were written for."
+  #{:address :applet :area :article :aside :base :basefont :bgsound
+    :blockquote :body :br :button :caption :center :col :colgroup :dd
+    :details :dir :div :dl :dt :embed :fieldset :figcaption :figure
+    :footer :form :frame :frameset :h1 :h2 :h3 :h4 :h5 :h6 :head :header
+    :hgroup :hr :html :iframe :img :input :keygen :li :link :listing :main
+    :marquee :menu :meta :nav :noembed :noframes :noscript :object :ol :p
+    :param :plaintext :pre :script :section :select :source :style
+    :summary :table :tbody :td :template :textarea :tfoot :th :thead
+    :title :tr :track :ul :wbr :xmp})
+
+(def ^:private walk-through-tags
+  "The three special elements the spec's tag-omission walks pass THROUGH
+   rather than stop at."
+  #{:address :div :p})
+
+(defn- closeable-index-in-scope
+  "Index in `stack` of the innermost element the incoming `tag-kw` closes,
+   or nil if there is none within scope.
+
+   This is the half of the tag-omission rules that a stack-TOP-only check
+   cannot express. `<p>text <span>a <div>` has a `<p>` open, but `<span>`
+   is on top, so a top-only check sees nothing closeable and nests the
+   `<div>` inside the `<p>` -- which no browser does, and which was the
+   single reason `:block/nested-block-in-inline` sat in the sibling cssom
+   repo's GEOMETRY residual.
+
+   Measured in Brave 151 rather than derived from the prose: for
+   `<p>text <span>a <div>b</div> c</span> end</p>` the browser produces a
+   `<p>` holding `text ` and a `<span>` holding `a `, then a SIBLING
+   `<div>` -- the still-open `<span>` is popped along with the `<p>`, and
+   its remaining text lands outside both. That is what \"close a p
+   element\" does: generate implied end tags, then pop until the p itself
+   has been popped, taking every open element above it with it."
+  [document stack tag-kw]
+  (loop [i (dec (count stack))]
+    (when (pos? i)
+      (let [tag (get-in document [:nodes (nth stack i) :tag])]
+        (cond
+          (contains? (auto-close-tags tag) tag-kw) i
+          (and (contains? special-tags tag)
+               (not (contains? walk-through-tags tag))) nil
+          :else (recur (dec i)))))))
+
 (defn- auto-close-stack
-  "Repeatedly pops `stack` while the CURRENT top's tag is closeable by the
-   incoming `tag-kw` per `auto-close-tags` (see that var's docstring for
-   why a single check isn't enough for the <td>/<th>->cascading-into-<tr>
-   chain), re-examining whatever new top each pop exposes. Never pops the
-   root (index 0). A tag with no cascading partner (li/option/p/dt/dd)
-   still only ever pops once, since none of THEIR parents are themselves
-   keys in `auto-close-tags`."
+  "Repeatedly pops `stack` while the incoming `tag-kw` closes something
+   open -- first the CURRENT top (see `auto-close-tags` for why a single
+   check isn't enough for the <td>/<th>->cascading-into-<tr> chain), then,
+   when the top itself is not closeable, the innermost closeable element
+   still within scope (see `closeable-index-in-scope`), popping everything
+   above it as a browser does. Never pops the root (index 0)."
   [document stack tag-kw]
   (loop [stack stack]
-    (if (and (> (count stack) 1)
-             (contains? (auto-close-tags (get-in document [:nodes (peek stack) :tag])) tag-kw))
+    (cond
+      (and (> (count stack) 1)
+           (contains? (auto-close-tags (get-in document [:nodes (peek stack) :tag])) tag-kw))
       (recur (pop stack))
-      stack)))
+
+      :else
+      (if-let [i (closeable-index-in-scope document stack tag-kw)]
+        (recur (subvec stack 0 i))
+        stack))))
 
 (defn- maybe-insert-implicit-tbody
   "Real HTML5's \"in table\" insertion mode inserts an implicit <tbody>
@@ -1192,10 +1258,28 @@
                 (recur document stack afe (next tokens)))
               ;; Any other end tag -> pop to the nearest matching open element.
               (let [match-idx (find-top-match-index document stack tag-kw)]
-                (recur document
-                       (if match-idx (subvec stack 0 match-idx) stack)
-                       afe
-                       (next tokens)))))
+                (if (and (nil? match-idx) (= :p tag-kw))
+                  ;; A stray `</p>` is not ignored. WHATWG's "in body" end
+                  ;; tag rule for `p`: if the stack has no p element in
+                  ;; button scope, this is a parse error -- "insert an HTML
+                  ;; element for a p start tag token with no attributes",
+                  ;; then close it. So the browser materialises an EMPTY
+                  ;; <p> where the stray tag was.
+                  ;;
+                  ;; Measured in Brave rather than assumed: `<p>a</p></p>b`
+                  ;; produces <p>a</p>, an empty <p>, then the text "b" --
+                  ;; and the same empty <p> appears at the end of
+                  ;; `<p>x <span>y <div>z</div> w</span> v</p>`, where the
+                  ;; block element already closed the paragraph and left
+                  ;; the author's own `</p>` with nothing to close. Three
+                  ;; corpus cases turned on this one rule.
+                  (let [[p-id document] (dom/create-element document :p)
+                        document (dom/append-child document (peek stack) p-id)]
+                    (recur document stack afe (next tokens)))
+                  (recur document
+                         (if match-idx (subvec stack 0 match-idx) stack)
+                         afe
+                         (next tokens))))))
 
           (recur document stack afe (next tokens)))
         (initialize-form-defaults document)))))

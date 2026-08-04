@@ -964,6 +964,42 @@
     (is (= :li (:tag li2))) (is (= ["two"] (:children li2)))
     (is (= :li (:tag li3))) (is (= ["three"] (:children li3)))))
 
+(deftest block-start-tag-closes-a-p-through-an-open-inline
+  ;; The half of the tag-omission rules a stack-TOP-only check cannot
+  ;; express. HTML5: "if the stack of open elements has a p element in
+  ;; button scope, close a p element" -- the <p> need not be innermost, and
+  ;; closing it pops every element opened above it.
+  ;;
+  ;; Measured in Brave 151 before this was implemented:
+  ;; `<p>text <span>a <div>b</div> c</span> end</p>` gives a <p> holding
+  ;; "text " and a <span> holding "a ", then a SIBLING <div>, then the rest
+  ;; of the text at top level. Before the fix the <div> nested inside the
+  ;; <p>, which no browser does -- and which was the whole of the sibling
+  ;; cssom repo's `:block/nested-block-in-inline` geometry failure.
+  (let [document (html/parse-into-document "<p>text <span>a <div>b</div> c</span> end</p>")
+        tree (dom/tree document)
+        [p div] (:children tree)]
+    (is (= :p (:tag p)))
+    (is (= :div (:tag div)) "the <div> is a SIBLING of the <p>, not a child")
+    (let [[text span] (:children p)]
+      (is (= "text " text))
+      (is (= :span (:tag span)) "the still-open <span> stays inside the <p>")
+      (is (= ["a "] (:children span)) "and keeps only the text it had opened with"))))
+
+(deftest a-stray-p-end-tag-materialises-an-empty-p
+  ;; WHATWG's "in body" rule for a `</p>` with no p element in button
+  ;; scope: insert an HTML element for a p start tag with no attributes,
+  ;; then close it. The browser does not ignore the tag -- it creates an
+  ;; empty paragraph where it appeared. Measured in Brave: `<p>a</p></p>b`
+  ;; produces <p>a</p>, an EMPTY <p>, then "b".
+  (let [tree (dom/tree (html/parse-into-document "<p>a</p></p>b"))
+        [first-p empty-p text] (:children tree)]
+    (is (= :p (:tag first-p)))
+    (is (= ["a"] (:children first-p)))
+    (is (= :p (:tag empty-p)))
+    (is (empty? (:children empty-p)))
+    (is (= "b" text))))
+
 (deftest li-auto-close-does-not-reach-past-a-nested-list
   ;; The auto-close check only looks at the TOP of the stack (the innermost
   ;; open element), never scanning down past it. A new <li> that opens
