@@ -73,6 +73,36 @@
   :group :table
   :html "<table><b>bold</b><tr><td>x</td></tr></table>"}
 
+ ;; Foster parenting again, at the three places the four cases above do
+ ;; not reach: a table that is not at the top level (the foster parent is
+ ;; the TABLE's parent, not the document root), a row rather than the
+ ;; table itself as the current node, and -- the one that still fails --
+ ;; a formatting element the author never closed, which needs the scope
+ ;; MARKERS this parser's list of active formatting elements does not
+ ;; have. See the SCOPE CUT comment in htmldom.core; the browser leaves
+ ;; the cell holding a bare text node, this parser reconstructs the <b>
+ ;; inside it.
+
+ {:id :table/foster-parent-into-the-tables-own-parent
+  :group :table
+  :html "<div><table>stray<tr><td>x</td></tr></table></div>"}
+
+ {:id :table/foster-parent-from-a-row
+  :group :table
+  :html "<table><tr>stray<td>x</td></tr></table>"}
+
+ {:id :table/foster-parent-unclosed-formatting
+  :group :table
+  :html "<table><b>bold<tr><td>x</td></tr></table>y"}
+
+ {:id :table/hidden-input-stays-in-the-table
+  :group :table
+  :html "<table><input type=\"hidden\"><tr><td>x</td></tr></table>"}
+
+ {:id :table/nested-table-closes-the-open-one
+  :group :table
+  :html "<table><table><tr><td>x</td></tr></table>"}
+
  {:id :table/nested-table
   :group :table
   :html "<table><tr><td><table><tr><td>in</td></tr></table></td></tr></table>"}

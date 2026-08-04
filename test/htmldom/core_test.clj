@@ -1732,3 +1732,174 @@
                   (str/join ""))]
     (is (= "a b" text)
         "ordinary spaces and tabs still collapse")))
+
+;; ---- foster parenting + implied row structure (WHATWG 13.2.6.1) --------
+;;
+;; Every assertion below records what a real Brave 151 built for the same
+;; markup, read through conformance/cdp_dump.cljs (innerHTML on a detached
+;; <div>, i.e. the HTML fragment parsing algorithm). Four of these shapes
+;; are also conformance corpus cases; the rest are shapes the corpus does
+;; not carry, measured the same way while working out how far the stack-
+;; based approximation of the table insertion modes actually reaches.
+
+(defn- shape
+  "A tree as nested vectors -- `[:tag child ...]`, text nodes as strings --
+   so a whole measured browser tree fits in one readable literal."
+  [node]
+  (into [(:tag node)]
+        (map #(if (string? %) % (shape %)))
+        (:children node)))
+
+(defn- parsed-shape [html]
+  (vec (rest (shape (dom/tree (html/parse-into-document html))))))
+
+(deftest text-in-a-table-is-foster-parented-in-front-of-it
+  ;; Brave: #text "stray", then <table><tbody><tr><td>x. Content that is
+  ;; not allowed in a table does not stay inside it -- it is inserted
+  ;; BEFORE the table, in the table's own parent.
+  (is (= ["stray" [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table>stray<tr><td>x</td></tr></table>")))
+  ;; ... and the foster parent is the TABLE's parent, not the document
+  ;; root: Brave puts `stray` inside the <div>, before the <table>.
+  (is (= [[:div "stray" [:table [:tbody [:tr [:td "x"]]]]]]
+         (parsed-shape "<div><table>stray<tr><td>x</td></tr></table></div>")))
+  ;; A table in a CELL fosters into that cell, for the same reason.
+  (is (= [[:table [:tbody [:tr [:td "inner"
+                                [:table [:tbody [:tr [:td "y"]]]]]]]]]
+         (parsed-shape
+          "<table><tr><td><table>inner<tr><td>y</td></tr></table></td></tr></table>"))))
+
+(deftest elements-in-a-table-are-foster-parented-in-document-order
+  ;; Brave: <div>d</div> then <table>...; and with two of them, both come
+  ;; out in front of the table in source order.
+  (is (= [[:div "d"] [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><div>d</div><tr><td>x</td></tr></table>")))
+  (is (= [[:div "a"] [:div "b"] [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><div>a</div><div>b</div><tr><td>x</td></tr></table>")))
+  ;; Mixed text and formatting keeps its order too (Brave: "a", <b>c</b>,
+  ;; "d", table). The text nodes are separate here and merged in Brave --
+  ;; a node-boundary difference this parser has everywhere, not a shape
+  ;; one; conformance/run.cljs coalesces both sides before comparing.
+  (is (= ["a" [:b "c"] "d" [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table>a<b>c</b>d<tr><td>x</td></tr></table>"))))
+
+(deftest foster-parenting-applies-in-row-and-row-group-contexts-too
+  ;; Brave fosters from all three of "in table", "in table body" and
+  ;; "in row" -- the current node being tbody or tr is no more a legal
+  ;; place for flow content than the table itself.
+  (is (= ["stray" [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><tr>stray<td>x</td></tr></table>")))
+  (is (= ["stray" [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><tbody>stray<tr><td>x</td></tr></tbody></table>")))
+  (is (= ["after" [:table [:tbody [:tr [:td "ok"]]]]]
+         (parsed-shape "<table><tr><td>ok</td></tr>after</table>")))
+  (is (= [[:div "d"] [:table [:tbody [:tr [:td "c"]]]]]
+         (parsed-shape "<table><tr><td>c</td></tr><div>d</div></table>"))))
+
+(deftest whitespace-only-runs-stay-inside-the-table
+  ;; Brave keeps both newlines INSIDE the table -- the first as a child of
+  ;; <table>, the second of the implied <tbody>, since that is the open
+  ;; element when it arrives. Only a run containing something other than
+  ;; ASCII whitespace is foster-parented.
+  (is (= [[:table "\n" [:tbody [:tr [:td "a"]] "\n"]]]
+         (parsed-shape "<table>\n<tr><td>a</td></tr>\n</table>")))
+  ;; A partly-whitespace run goes out WHOLE, spaces included.
+  (is (= [" x " [:table [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape "<table> x <tr><td>a</td></tr></table>")))
+  ;; U+00A0 is not ASCII whitespace and not collapsible, so `&nbsp;` in a
+  ;; table is fostered like any other text -- measured in Brave, and the
+  ;; reason the whitespace test here is a spelled-out character class
+  ;; rather than `\s` or `str/blank?`, both of which match U+00A0.
+  (is (= [" " [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table>&nbsp;<tr><td>x</td></tr></table>"))))
+
+(deftest table-structure-and-head-elements-are-not-foster-parented
+  ;; Measured one shape per tag: these stayed inside the <table> in Brave.
+  (is (= [[:table [:caption "c"] [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><caption>c</caption><tr><td>x</td></tr></table>")))
+  (is (= [[:table [:colgroup [:col]] [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><colgroup><col></colgroup><tr><td>x</td></tr></table>")))
+  (is (= [[:table [:style "s"] [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><style>s</style><tr><td>x</td></tr></table>")))
+  (is (= [[:table [:form] [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><form action=\"/\"><tr><td>x</td></tr></form></table>")))
+  ;; <input type=hidden> is the one attribute-dependent member: Brave keeps
+  ;; it in the table (it renders nothing) and fosters every other input.
+  (is (= [[:table [:input] [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><input type=\"hidden\"><tr><td>x</td></tr></table>")))
+  (is (= [[:input] [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><input type=\"text\"><tr><td>x</td></tr></table>"))))
+
+(deftest a-bare-cell-gets-an-implied-row-as-well-as-an-implied-row-group
+  ;; Brave completes <table><td>x</td></table> into tbody/tr/td. Only the
+  ;; tbody half of this existed before; the docstring of what is now
+  ;; `maybe-insert-implied-table-structure` said the tr half was out of
+  ;; scope, and the conformance corpus (:table/td-without-tr) sized it.
+  (is (= [[:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><td>x</td></table>")))
+  (is (= [[:table [:tbody [:tr [:th "x"]]]]]
+         (parsed-shape "<table><th>x</th></table>")))
+  ;; Consecutive bare cells share the one implied row (Brave), and a cell
+  ;; inside an EXPLICIT row group gets the implied row there.
+  (is (= [[:table [:tbody [:tr [:td "a"] [:td "b"]]]]]
+         (parsed-shape "<table><td>a</td><td>b</td></table>")))
+  (is (= [[:table [:thead [:tr [:td "x"]]]]]
+         (parsed-shape "<table><thead><td>x</td></thead></table>")))
+  ;; A cell arriving after a row has closed opens a NEW row, not a second
+  ;; row group (Brave).
+  (is (= [[:table [:tbody [:tr [:td "a"]] [:tr [:td "b"]]]]]
+         (parsed-shape "<table><tr><td>a</td></tr><td>b</td></table>"))))
+
+(deftest a-foster-parented-element-left-open-does-not-swallow-the-rows
+  ;; Foster parenting moves where a node is INSERTED, never whether it is
+  ;; open -- so the still-open <b> would be the insertion point when <tr>
+  ;; arrives if nothing popped it. Brave: <b>bold</b>, then the table with
+  ;; its rows, then a fresh <b> around the trailing text.
+  ;;
+  ;; The <b> around the cell's own "x" is this parser's documented scope
+  ;; cut, not the browser's answer (Brave gives a bare #text "x"): there
+  ;; are no scope MARKERS in the list of active formatting elements, so
+  ;; formatting still open when the table started is reconstructed on
+  ;; entry to the first cell. See the SCOPE CUT comment in htmldom.core.
+  (is (= [[:b "bold"]
+          [:table [:tbody [:tr [:td [:b "x"]]]]]
+          [:b "y"]]
+         (parsed-shape "<table><b>bold<tr><td>x</td></tr></table>y")))
+  ;; The same shape with the element closed matches Brave exactly, because
+  ;; the adoption agency drops it from the list at `</b>`.
+  (is (= [[:b "bold"] [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><b>bold</b><tr><td>x</td></tr></table>"))))
+
+(deftest a-nested-table-in-table-context-closes-the-open-one
+  ;; Brave gives TWO sibling tables here -- the first empty, the second
+  ;; holding the row -- not one inside the other.
+  (is (= [[:table] [:table [:tbody [:tr [:td "x"]]]]]
+         (parsed-shape "<table><table><tr><td>x</td></tr></table>")))
+  ;; A table inside a CELL still nests, because a cell is an ordinary
+  ;; insertion point rather than table structure.
+  (is (= [[:table [:tbody [:tr [:td [:table [:tbody [:tr [:td "y"]]]]]]]]]
+         (parsed-shape
+          "<table><tr><td><table><tr><td>y</td></tr></table></td></tr></table>"))))
+
+(deftest stray-table-structure-tags-outside-any-table-do-not-throw
+  ;; Rubbish input, but reachable: a `<tr>`/`<td>`/`<tbody>` at top level
+  ;; makes the current node LOOK like table structure with no table
+  ;; anywhere to foster out of or to close. Every branch of the in-table
+  ;; block has to tolerate that -- `close-open-table-for-nested-table` did
+  ;; not, and threw on the subvec.
+  ;;
+  ;; These assertions are about NOT THROWING, not about matching Brave.
+  ;; Brave drops the stray tags outright (`<tr><table>x</table>` gives it
+  ;; `#text "x"` then an empty `<table>`; `<td>x</td>` gives it a bare
+  ;; `#text "x"`), because "in body" has no rule that keeps them and this
+  ;; parser has no insertion modes to know that. That is the same
+  ;; pre-existing gap `:misc/body-tag-in-flow` measures, and is out of
+  ;; scope here -- what matters is that the shapes below are stable and
+  ;; internally consistent rather than an exception.
+  (is (= [[:tr "x" [:table]]] (parsed-shape "<tr><table>x</table>"))
+      "the text still fosters in front of the table, inside the stray row")
+  (is (= [[:tbody [:div "d"]]] (parsed-shape "<tbody><div>d</div></tbody>"))
+      "no open table means nowhere to foster to, so the div is appended")
+  (is (= [[:tr "t"]] (parsed-shape "<tr>t")))
+  (is (= [[:td "x"]] (parsed-shape "<td>x</td>"))
+      "no implied tbody/tr without a table to put them in"))

@@ -22,73 +22,86 @@ browser that actually is. The sibling `kotoba-lang/cssom` repo measures its
 **layout** the same way and that harness has repeatedly found real bugs;
 this is the parser's own equivalent, and the first run found two.
 
-## Result — 2026-08-04, first run
+## Result
 
-**Tree shape: 82/100 = 82%** on the first run against the unmodified parser.
-After two fixes the harness justified (below): **88/100 = 88%**.
-
-The number that matters is not 88 but the map underneath it. Per group:
+**Tree shape: 102/113 = 90%.** The first run, on 2026-08-04 against the
+unmodified parser, was 82/100 = 82%; the corpus has grown since, so the two
+numbers are not directly comparable — the map underneath them is the point.
+Per group:
 
 | group | | | |
 |---|---|---|---|
-| attribute | 11/11 | 100% | |
+| attribute | 12/12 | 100% | |
 | eof | 8/8 | 100% | after the tag-open fix; was 3/8 |
 | form | 4/4 | 100% | |
 | list | 6/6 | 100% | |
+| paragraph | 7/7 | 100% | |
 | rawtext | 9/9 | 100% | |
 | whitespace | 5/5 | 100% | |
+| table | 20/21 | 95% | after foster parenting; was 12/16 |
 | formatting | 10/11 | 91% | |
 | entity | 7/8 | 88% | after the nbsp fix; was 6/8 |
-| paragraph | 6/7 | 86% | |
 | misc | 4/5 | 80% | |
 | selfclose | 4/5 | 80% | |
-| **table** | **12/16** | **75%** | the largest single gap |
+| **omission** | **5/8** | **63%** | one cause, see below |
 | **comment** | **1/4** | **25%** | structurally impossible today |
 
-**Attributes** (a secondary axis, see below): 236/237 comparable elements
+**Attributes** (a secondary axis, see below): 303/304 comparable elements
 carry exactly the browser's attribute map.
 
-82% is higher than the repo's own framing would predict, and that is a real
-finding: optional end tags, implied `<tbody>`, misnested formatting, raw
-text, entity decoding and attribute tokenization are in far better shape
-than "trusted subset only" suggests — the parser has quietly grown most of
-an in-body insertion mode. The remaining 12 failures are not scattered; they
-are four causes.
+82% on the first run was already higher than the repo's own framing would
+predict, and that was a real finding: optional end tags, implied `<tbody>`,
+misnested formatting, raw text, entity decoding and attribute tokenization
+were in far better shape than "trusted subset only" suggests — the parser
+had quietly grown most of an in-body insertion mode. The remaining failures
+are not scattered; they are four causes.
 
 ## The four causes, in order of size
 
-**1. Table foster parenting (3 cases) — not implemented.** Non-table content
-between `<table>` and its first row must be moved *before* the table.
-`<table>stray<tr><td>x</table>` gives a browser `#text "stray"` followed by
-`table`; here it stays nested inside the table. Same for `<div>` and for
-formatting elements. `htmldom.core`'s own namespace commentary already lists
-"foster parenting (in-table)" as deferred to L3, so this is a measured
-confirmation of a documented cut rather than news — but it is now sized.
-
-**2. Comments have no node type (3 cases).** `kotoba.wasm.dom` knows only
+**1. Comments have no node type (3 cases).** `kotoba.wasm.dom` knows only
 `:element` and `:text`; `tokenize` therefore discards comments entirely.
 Every case with a comment in it diverges, and the divergence cascades —
 which is why the harness special-cases the category (see
 `divergence-category`) instead of reporting the shifted text that follows.
 Fixing this needs a change in `kotoba-lang/dom-gpu`, not here.
 
-**3. `in table` insertion mode is incomplete beyond `<tbody>` (1 case).**
-`<table><td>x</table>` should synthesise `tbody` *and* `tr`;
-`maybe-insert-implicit-tbody` covers only a `<tr>` whose parent is the
-table, and says so in its docstring.
+**2. "Reconstruct the active formatting elements" runs for every start tag
+(3 cases, the whole `omission` residual).** WHATWG runs that step for
+character tokens and for the "any other start tag" rule, but *not* for the
+block-level start tags that close an open `<p>` — `ul`, `table`, `dd` and
+the rest have their own "in body" rules, and none of them reconstructs.
+`parse-into-document` reconstructs unconditionally, so
+`<p>lead <em>emph <ul>` reopens the `<em>` and puts the `<ul>` inside it,
+where a browser makes the `<ul>` a sibling at depth 0 and only reopens the
+`<em>` for the text that follows the list. Measured in Brave for all three
+(`:omission/ul-closes-p-through-em`,
+`:omission/table-closes-p-through-inline`,
+`:omission/dd-closes-dt-through-inline`). The table insertion modes already
+carry the equivalent exemption — see `inserted-by-table-mode?` — so the
+shape of the fix is known; it is the in-body half that is missing.
 
-**4. Individually rare spec behaviours (5 cases).** `</p>` with no open `<p>`
-inserts an empty one; `</br>` is treated as `<br>`; `<a>` inside `<a>`
-closes the outer one (the `a`/`nobr` special case, listed as deferred in the
-namespace commentary); `<body>` in flow content is ignored (there is no
-html/head/body model at all — an L3 architectural change); `&notit;` expands
-to `¬it;` because a browser matches the longest named reference even without
-a semicolon.
+**3. No scope markers in the list of active formatting elements (1 case).**
+The spec pushes a marker when it opens a `td`/`th`/`caption` (and an
+`applet`/`marquee`/`object`/`template`), and reconstruction never walks back
+past it. Without markers, formatting still open when a table starts is
+recreated inside the first cell: `<table><b>bold<tr><td>x` gives a browser a
+bare `#text "x"` in the cell and gives this parser `<b>x</b>`. Everything
+else about that shape — the foster-parented `<b>bold</b>`, the row
+structure, the `<b>` around the trailing text — matches. Written up at the
+SCOPE CUT comment in `htmldom.core`, and measured by
+`:table/foster-parent-unclosed-formatting`.
 
-## What the two parser fixes were, and why they were fixes
+**4. Individually rare spec behaviours (4 cases).** `</br>` is treated as
+`<br>`; `<a>` inside `<a>` closes the outer one (the `a`/`nobr` special
+case, listed as deferred in the namespace commentary); `<body>` in flow
+content is ignored (there is no html/head/body model at all — an L3
+architectural change); `&notit;` expands to `¬it;` because a browser matches
+the longest named reference even without a semicolon.
 
-Both were found by this harness, both have the evidence recorded in a code
-comment at the change site, and both left the 143-test suite at 0 failures.
+## What the parser fixes were, and why they were fixes
+
+Each was found by this harness, each has its evidence recorded in a code
+comment at the change site, and each left the test suite at 0 failures.
 
 **Bare `<` in prose was fabricating elements and deleting text.**
 `<p>1 < 2 and 3 > 4</p>` tokenized to a start tag named `2` with an
@@ -111,6 +124,26 @@ destroys the only thing `&nbsp;` exists to do, and CSS is explicit that
 U+00A0 is not collapsible white space. The class is now spelled out as
 HTML's own ASCII whitespace set minus the newline this parser deliberately
 keeps.
+
+**Tables did not foster-parent, and a bare `<td>` got no row.** Content that
+is not allowed in a table — text, a `<div>`, a formatting element — must be
+inserted *before* the table in the table's own parent (WHATWG 13.2.6.1,
+"the rules for inserting a node into a foster parent"); it was staying
+nested inside the table instead. `htmldom.core` now reads the spec's
+foster-parenting condition off the stack of open elements rather than off
+insertion modes it does not have: the insertion point is table structure
+exactly when the current node is `table`/`tbody`/`thead`/`tfoot`/`tr`, which
+is the set §13.2.6.1 itself tests. Every tag's allowed/fostered status was
+measured one shape at a time in Brave rather than read off the prose,
+including the two the prose makes easy to miss — a whitespace-only run stays
+*inside* the table (but `&nbsp;` does not, since U+00A0 is not ASCII
+whitespace), and `<input type=hidden>` stays while every other input goes
+out. Three companion rules came with it, each measured: a table-structure
+start tag clears the stack back to its own context (without which a
+foster-parented element left open swallows the rows), a bare `<td>` gets an
+implied `<tr>` as well as the implied `<tbody>`, and a `<table>` inside
+table context closes the open table rather than nesting. `table` 12/16 →
+20/21, with the one residual being cause 3 above.
 
 Deliberately **not** fixed: everything in the four causes above, plus the
 one attribute divergence — `@click="f"` becomes `click="f"`, because

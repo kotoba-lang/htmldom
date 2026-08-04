@@ -958,41 +958,312 @@
         (recur (subvec stack 0 i))
         stack))))
 
-(defn- maybe-insert-implicit-tbody
-  "Real HTML5's \"in table\" insertion mode inserts an implicit <tbody>
-   before a <tr> start tag when no <tbody>/<thead>/<tfoot> is already open
-   -- i.e. the single most common real-world table shape, rows with no
-   explicit row-group wrapper at all (`<table><tr>...</tr><tr>...</tr>
-   </table>`). Without this, every <tr> nested directly under <table>,
-   which is a genuinely visible, reachable bug, not just a DOM-purity
+;; ============================================================
+;; "In table" insertion: implied row structure + foster parenting
+;; (WHATWG §13.2.6.4.9-11 and §13.2.6.1)
+;;
+;; The spec expresses all of this through the insertion-mode state machine
+;; ("in table" / "in table body" / "in row" / "in cell", plus a foster
+;; parenting FLAG that those modes set before delegating to "in body").
+;; This parser has no insertion modes -- see the L2/L3 commentary further
+;; down -- so it reads the same information off the STACK OF OPEN ELEMENTS
+;; instead: the insertion point is "inside table structure" exactly when
+;; the current node (stack top) is one of `table`/`tbody`/`thead`/`tfoot`/
+;; `tr`, which is the same set the spec's own "appropriate place for
+;; inserting a node" tests for. That equivalence is what makes a stackful
+;; approximation honest here rather than a guess; where it stops being
+;; equivalent is written down at `table-cell-formatting-gap` below.
+
+(def ^:private table-context-tags
+  "The elements that, as the CURRENT NODE, mean the insertion point is
+   inside a table's own structure. Identical to the set WHATWG
+   §13.2.6.1 names when deciding whether foster parenting applies.
+
+   `td`/`th`/`caption` are deliberately absent: a cell (or a caption) is
+   an ordinary flow-content insertion point -- `<td><div>` nests, it does
+   not foster-parent -- which is why the spec gives cells their own
+   insertion mode rather than treating them as table structure."
+  #{:table :tbody :thead :tfoot :tr})
+
+(def ^:private table-content-tags
+  "Start tags that are ALLOWED to be inserted while the current node is one
+   of `table-context-tags`, so they nest normally instead of being
+   foster-parented out. Everything else -- every ordinary flow, phrasing
+   and formatting element -- is not allowed in table structure and gets
+   moved before the table (see `foster-parent-place`).
+
+   Measured in Brave 151 rather than read off the prose, one shape per
+   entry (`<table>X<tr><td>x</td></tr></table>`, X being the tag under
+   test): `caption`, `colgroup`, `col`, `tbody`, `thead`, `tfoot`, `tr`,
+   `td`, `th`, `style`, `script`, `template` and `form` all stayed inside
+   the `<table>`; `div`, `p`, `li`, `b`, `a`, `br` and a typed `<input>`
+   all came back out in front of it.
+
+   `:table` is NOT here on purpose, and is not foster-parented either --
+   it has its own rule, see `close-open-table-for-nested-table`."
+  #{:caption :colgroup :col :tbody :thead :tfoot :tr :td :th
+    :style :script :template :form})
+
+(defn- hidden-input?
+  "The one attribute-dependent member of `table-content-tags`. WHATWG's
+   \"in table\" mode keeps an `<input type=hidden>` inside the table (it
+   renders nothing, so its position is immaterial) and foster-parents
+   every other input. Measured: `<table><input type=\"hidden\" name=\"h\">
+   <tr>...` left the input as a child of the `<table>`, while
+   `<table><input type=\"text\">...` put it before the table."
+  [tag-kw attrs]
+  (and (= :input tag-kw)
+       (= "hidden" (some-> (:type attrs) str/lower-case))))
+
+(defn- innermost-index
+  "Index in `stack` of the innermost (topmost) open element whose tag is in
+   `tags`, or nil. Never matches the root at index 0."
+  [document stack tags]
+  (loop [i (dec (count stack))]
+    (when (pos? i)
+      (if (contains? tags (get-in document [:nodes (nth stack i) :tag]))
+        i
+        (recur (dec i))))))
+
+(defn- open-table-index [document stack] (innermost-index document stack #{:table}))
+
+(defn- in-table-context?
+  "Whether the current node is table structure, i.e. whether an insertion
+   here is subject to the allowed/foster-parented split above."
+  [document stack]
+  (contains? table-context-tags (get-in document [:nodes (peek stack) :tag])))
+
+(defn- child-holder-id
+  "The element that actually holds `child-id` as a child. Checks the open
+   elements from the top down first (O(depth), and the answer for every
+   node inserted at the current insertion point), falling back to a scan of
+   the whole document only for a node that was itself foster-parented and
+   therefore does NOT live under the element below it on the stack."
+  [document stack child-id]
+  (or (some (fn [id]
+              (when (some #{child-id} (get-in document [:nodes id :children])) id))
+            (reverse stack))
+      (parent-node-id document child-id)))
+
+(defn- foster-parent-place
+  "WHATWG §13.2.6.1, \"the rules for inserting a node into a foster
+   parent\": `[parent-id before-id]`, i.e. immediately BEFORE the innermost
+   open `<table>` inside that table's own parent. nil when no table is
+   open (nothing to foster out of).
+
+   Measured, and it is the part the prose makes easy to get wrong: the
+   foster parent is the TABLE'S parent, not the document root and not the
+   nearest non-table ancestor on the stack. `<div><table>stray<tr><td>x`
+   puts `stray` inside the `<div>`, before the `<table>`; `<td><table>inner
+   <tr><td>y` puts `inner` inside the enclosing outer `<td>`. Both come
+   out wrong if the fostered node is simply appended somewhere higher."
+  [document stack]
+  (when-let [i (open-table-index document stack)]
+    (let [table-id (nth stack i)]
+      [(child-holder-id document stack table-id) table-id])))
+
+(defn- insert-node
+  "Append `node-id` at the current insertion point, or -- when `foster?` --
+   at the foster parent instead. The single place this file turns \"where
+   does this node go\" into a DOM mutation, so text nodes, elements and
+   reconstructed formatting elements cannot disagree about it."
+  [document stack node-id foster?]
+  (if-let [[parent-id before-id] (and foster? (foster-parent-place document stack))]
+    (dom/insert-before document parent-id node-id before-id)
+    (dom/append-child document (peek stack) node-id)))
+
+(def ^:private ascii-whitespace-only
+  "A text run made ENTIRELY of HTML's own ASCII whitespace, which \"in
+   table\" keeps inside the table instead of foster-parenting it.
+
+   Spelled out rather than `\\s` or `str/blank?` for the same reason the
+   collapsing class in `parse-into-document` is: both of those also match
+   U+00A0 NO-BREAK SPACE, and a `&nbsp;` is NOT whitespace to this rule.
+   Measured: `<table>\\n<tr><td>a</td></tr>\\n</table>` leaves both newlines
+   inside the table (the first as a child of `<table>`, the second of the
+   implied `<tbody>`), while `<table>&nbsp;<tr>...` foster-parents the
+   no-break space out in front of the table. A run that is only PARTLY
+   whitespace goes out whole: `<table> x <tr>` fosters `\" x \"`, spaces
+   included -- which falls out for free here, because this parser's
+   tokenizer emits one text token per contiguous run, the same granularity
+   as the spec's \"pending table character tokens\" buffer."
+  #"[ \t\n\f\r]*")
+
+(defn- foster-parented-text?
+  [document stack text]
+  (and (in-table-context? document stack)
+       (not (re-matches ascii-whitespace-only text))))
+
+(defn- foster-parented-element?
+  [document stack tag-kw attrs]
+  (and (in-table-context? document stack)
+       (not (contains? table-content-tags tag-kw))
+       (not= :table tag-kw)
+       (not (hidden-input? tag-kw attrs))))
+
+(def ^:private table-clear-targets
+  "Where an incoming table-structure start tag pops the stack back to,
+   before it is inserted -- WHATWG's three \"clear the stack back to a
+   table X context\" steps, as the set of tags each one stops at.
+
+   Without this, foster parenting alone is not enough: a foster-parented
+   element stays ON the stack of open elements (foster parenting moves
+   where a node is inserted, never whether it is open), so
+   `<table><div>d<tr><td>x` would try to open the row inside the still-open
+   `<div>`. Measured -- `<b>bold</b>` comes out in front of the table and
+   the row structure is built inside it regardless of the unclosed `<b>`.
+
+   Only consulted when a `<table>` is actually open (see
+   `clear-to-table-context`): a stray `<tr>`/`<td>` outside any table is a
+   different spec rule (in-body ignores it) that this parser does not
+   implement, and popping the stack for one would be a behaviour change
+   with no table anywhere to justify it."
+  {:caption  #{:table}
+   :colgroup #{:table}
+   :tbody    #{:table}
+   :thead    #{:table}
+   :tfoot    #{:table}
+   ;; "clear the stack back to a table body context"
+   :tr       #{:tbody :thead :tfoot :table}
+   ;; "clear the stack back to a table row context" -- with the row-group
+   ;; and table stops folded in, because a cell arriving in either of those
+   ;; contexts is defined by the spec as "act as if a <tr> start tag had
+   ;; been seen, then reprocess", which lands on the same place.
+   :td       #{:tr :tbody :thead :tfoot :table}
+   :th       #{:tr :tbody :thead :tfoot :table}})
+
+(defn- clear-to-table-context
+  [document stack tag-kw]
+  (if-let [targets (get table-clear-targets tag-kw)]
+    (if (open-table-index document stack)
+      (if-let [i (innermost-index document stack targets)]
+        (subvec stack 0 (inc i))
+        stack)
+      stack)
+    stack))
+
+(defn- close-open-table-for-nested-table
+  "A `<table>` start tag while the insertion point is inside table
+   structure closes the open table rather than nesting inside it (WHATWG
+   \"in table\": parse error, act as if a `</table>` end tag had been
+   seen, then reprocess).
+
+   Measured: `<table><table><tr><td>x</td></tr></table>` gives a browser
+   TWO sibling tables -- the first empty, the second holding the row --
+   not one inside the other. A `<table>` inside a CELL is untouched by
+   this, because a cell is not `table-context-tags`, which is what makes
+   ordinary nested tables (`<td><table>...`) still nest.
+
+   Guarded on an open table actually EXISTING, not just on the current
+   node looking like table structure: `<tr><table>x</table>` (a stray
+   `<tr>` at top level with no table anywhere -- rubbish, but reachable
+   input) leaves a `tr` as the current node with nothing to close, and
+   without this guard the index lookup returns nil and the subvec throws.
+   Nothing else in this block has the same hole: `clear-to-table-context`
+   carries the same guard for its own reason, and `foster-parent-place`
+   returns nil, which `insert-node` reads as \"append normally\"."
+  [document stack tag-kw]
+  (if-let [i (and (= :table tag-kw)
+                  (in-table-context? document stack)
+                  (open-table-index document stack))]
+    (subvec stack 0 i)
+    stack))
+
+(defn- maybe-insert-implied-table-structure
+  "Real HTML5's table insertion modes synthesise the row structure an
+   author left out: a `<tbody>` for a `<tr>` that has none, and both a
+   `<tbody>` and a `<tr>` for a bare `<td>`/`<th>`.
+
+   The `<tbody>` half is the single most common real-world table shape,
+   rows with no row-group wrapper at all (`<table><tr>...</tr><tr>...</tr>
+   </table>`). Without it every `<tr>` nests directly under `<table>`,
+   which is a genuinely visible, reachable bug rather than a DOM-purity
    nicety: a `table > tr` CSS child-combinator selector wrongly MATCHED
    (confirmed by direct reproduction), when real HTML5/CSS never lets it
    -- a real tr's parent is always a row group -- while the equally common
    `tbody > tr` selector wrongly never matched a bare table's own rows.
 
-   Only triggers when the current stack top is `:table` itself (no
-   row-group open yet); a second, third, etc. <tr> correctly reuses the
-   SAME already-open implicit <tbody> instead of inserting another one,
-   since `auto-close-stack` (called before this, on `:tr`'s own trigger
-   set `#{:tr}`) pops the previous <tr> (and any still-open <td>/<th>)
-   but deliberately does NOT pop the synthesized <tbody> itself -- `:tbody`
-   is not a key in `auto-close-tags` -- so it stays as the new stack top.
+   The `<tr>` half covers `<table><td>x</td></table>` and
+   `<table><tbody><td>x</td></tbody></table>`, both of which a browser
+   completes into `tbody`/`tr`/`td` (measured); it was called out as a
+   deliberate omission here until the conformance harness sized it.
 
-   Deliberately scoped to `:tr` only, mirroring the same \"most common
-   case, not full spec coverage\" convention as `auto-close-tags`: a bare
-   <td>/<th> directly under <table> with no <tr> at all (itself already
-   an unusual, arguably-malformed shape) is NOT covered here -- it still
-   nests directly under whatever the current stack top is, same as before
-   this fix. Explicit <thead>/<tbody>/<tfoot> tags are unaffected either
-   way -- this only ever fires when none of the three appear in the
-   source at all."
+   A second, third, etc. `<tr>` correctly reuses the SAME already-open
+   row group instead of inserting another one, because
+   `clear-to-table-context` pops a `<tr>` back to its row group and stops
+   there -- so the stack top is that group, not the table, and neither
+   branch below fires."
   [document stack tag-kw]
-  (if (and (= tag-kw :tr)
-           (= :table (get-in document [:nodes (peek stack) :tag])))
-    (let [[tbody-id document] (dom/create-element document :tbody)
-          document (dom/append-child document (peek stack) tbody-id)]
-      [document (conj stack tbody-id)])
-    [document stack]))
+  (letfn [(open [document stack tag]
+            (let [[id document] (dom/create-element document tag)]
+              [(dom/append-child document (peek stack) id) (conj stack id)]))
+          (top [document stack] (get-in document [:nodes (peek stack) :tag]))]
+    (cond
+      (and (= tag-kw :tr) (= :table (top document stack)))
+      (open document stack :tbody)
+
+      (contains? #{:td :th} tag-kw)
+      (let [[document stack] (if (= :table (top document stack))
+                               (open document stack :tbody)
+                               [document stack])]
+        (if (contains? #{:tbody :thead :tfoot} (top document stack))
+          (open document stack :tr)
+          [document stack]))
+
+      :else [document stack])))
+
+(defn- inserted-by-table-mode?
+  "Whether this start tag is being inserted by the TABLE insertion modes
+   rather than by \"in body\" -- which is what decides whether the
+   \"reconstruct the active formatting elements\" step runs at all.
+
+   None of \"in table\", \"in table body\" or \"in row\" reconstructs;
+   only \"in body\" (and \"in cell\", which delegates to it) does. Getting
+   this wrong is not subtle. Measured, before this predicate existed and
+   with foster parenting already in: `<table><b>bold<tr><td>x</td></tr>
+   </table>` put the entire `<tr>` -- row, cell and text -- inside a
+   freshly reconstructed `<b>` in FRONT of the table, and left the
+   `<table>` holding nothing but an empty `<tbody>`. The reconstruction
+   fired because `clear-to-table-context` had just popped the still-open
+   `<b>` off the stack, which is exactly what makes the list of active
+   formatting elements look like it needs rebuilding."
+  [document stack tag-kw]
+  (and (in-table-context? document stack)
+       (contains? table-content-tags tag-kw)))
+
+;; ------------------------------------------------------------
+;; SCOPE CUT: formatting still open when a table cell is entered.
+;; What the block above deliberately does NOT do, written at the boundary
+;; it stops at.
+;;
+;; The spec inserts a MARKER into the list of active formatting elements
+;; when it opens a `td`/`th`/`caption` (and an `applet`/`marquee`/`object`
+;; /`template`), and "reconstruct the active formatting elements" never
+;; walks back past the last marker. That is what stops formatting which
+;; was open when the table started from being re-created inside the first
+;; cell. There are no markers here -- the L2 commentary below already
+;; lists them as deferred -- and foster parenting makes the gap REACHABLE
+;; for the first time, because a formatting element opened in table
+;; context now genuinely stays open with the table's row structure built
+;; underneath it.
+;;
+;; So: `<table><b>bold<tr><td>x` (an unclosed `<b>` inside a table).
+;; Measured in Brave: `<b>bold</b>`, then the table, and the cell holds a
+;; bare `#text "x"`. Here the cell holds `<b>x</b>` instead, because the
+;; still-listed `<b>` is reconstructed on entry to the cell. The
+;; foster-parented `<b>bold</b>` itself, the row structure and everything
+;; outside the table are correct; what is wrong is confined to formatting
+;; leaking INTO cells, and only when the author left the formatting
+;; element unclosed across the table's first row.
+;;
+;; Closing it needs markers threaded through `push-afe`,
+;; `reconstruct-active-formatting` and the adoption agency's step 4.3
+;; ("the last element ... between the end of the list and the last
+;; marker"), plus "clear the list up to the last marker" when the cell
+;; closes -- i.e. it is a change to the formatting algorithms, not to
+;; table handling, and it is scoped as such rather than smuggled in here.
+;; `<table><b>bold</b><tr>...`, where the author did close the element, is
+;; unaffected: the adoption agency removes it from the list at `</b>`.
 
 (defn- preserve-whitespace-context?
   "Whether the CURRENT stack means whitespace in an about-to-be-created
@@ -1032,11 +1303,18 @@
 ;; Deliberately deferred to L3 (documented honest cuts, same convention as
 ;; `auto-close-tags`): the adoption agency's furthest-block reparenting path
 ;; (steps 9-19 -- rare block-in-inline like <b><p>x</b>, falls back to naive
-;; nesting here, no crash); foster parenting (in-table); the full 23-mode
-;; insertion-mode state machine; html/head/body synthesis; template/select/
-;; frameset modes; scope markers (cells are not real insertion modes yet, so
-;; formatting may leak across table cells); the `a`/`nobr` in-scope special
-;; cases; "generate implied end tags" for the any-other-end-tag path.
+;; nesting here, no crash); the full 23-mode insertion-mode state machine;
+;; html/head/body synthesis; template/select/frameset modes; scope markers
+;; (so formatting still open when a table starts leaks into the first cell
+;; -- the SCOPE CUT comment above sizes exactly what that costs); the
+;; `a`/`nobr` in-scope special cases; "generate implied end tags" for the
+;; any-other-end-tag path.
+;;
+;; Foster parenting (in-table) WAS on this list and no longer is: it is
+;; implemented above, against measured browser behaviour rather than the
+;; prose, without the insertion-mode machine -- the stack of open elements
+;; carries the same information for this one decision, and the block says
+;; where that equivalence stops.
 
 (def ^:private formatting-tags
   "WHATWG §13.2.4.2 'Formatting' category -- start tags that push onto the
@@ -1080,12 +1358,19 @@
 
 (defn- insert-element-for-token
   "Create a new element with `src-id`'s tag and attrs ('an element for the
-  token for which src-id was created'), append it to `parent-id`, return
-  [new-id document]. Used by reconstruct-active-formatting."
-  [document parent-id src-id]
+  token for which src-id was created'), insert it at the appropriate place
+  for the current `stack`, return [new-id document]. Used by
+  reconstruct-active-formatting.
+
+  Goes through `insert-node` rather than appending directly, so a
+  formatting element reopened while the insertion point is inside table
+  structure is foster-parented like any other -- `<table>a<b>c</b>d<tr>`
+  puts `a`, `<b>c</b>` and `d` all in front of the table, and reopening
+  the `<b>` inside the table would have put it back in."
+  [document stack src-id]
   (let [tag (tag-of document src-id)
         [new-id document] (dom/create-element document tag)
-        document (dom/append-child document parent-id new-id)
+        document (insert-node document stack new-id (in-table-context? document stack))
         document (apply-attrs document new-id (get-in document [:nodes src-id :attrs]))]
     [new-id document]))
 
@@ -1114,7 +1399,7 @@
           (if (>= i n)
             [document stack v]
             (let [old-id (nth v i)
-                  [new-id document] (insert-element-for-token document (peek stack) old-id)]
+                  [new-id document] (insert-element-for-token document stack old-id)]
               (recur document (conj stack new-id) (assoc v i new-id) (inc i)))))))))
 
 (defn- adoption-agency
@@ -1205,7 +1490,15 @@
                        (str/replace text #"[ \t\f\r]+" " "))
                 [document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-text-node document text)]
-            (recur (dom/append-child document (peek stack) id) stack afe (next tokens)))
+            ;; Asked AFTER reconstructing, deliberately: reconstructing is
+            ;; itself an insertion, so a formatting element reopened in
+            ;; table context has already been foster-parented and is now
+            ;; the current node -- at which point this run belongs INSIDE
+            ;; it (`<table>a<b>c` puts `c` in the `<b>`, not a second time
+            ;; in front of the table), and `in-table-context?` says so.
+            (recur (insert-node document stack id
+                                (foster-parented-text? document stack text))
+                   stack afe (next tokens)))
 
           :start
           (let [tag-kw (keyword tag)
@@ -1218,15 +1511,30 @@
                 ;; when the newly-exposed top ALSO matches (e.g. a new <tr>
                 ;; closing an open <td> then also the enclosing <tr>).
                 stack (auto-close-stack document stack tag-kw)
-                [document stack] (maybe-insert-implicit-tbody document stack tag-kw)
+                ;; The three "in table" steps, in the order the spec runs
+                ;; them: a nested <table> closes the open one; a table
+                ;; structure tag pops back to the context it belongs in
+                ;; (which is also what un-nests it from a foster-parented
+                ;; element left open inside the table); then the row
+                ;; structure the author omitted is synthesised.
+                stack (close-open-table-for-nested-table document stack tag-kw)
+                stack (clear-to-table-context document stack tag-kw)
+                [document stack] (maybe-insert-implied-table-structure document stack tag-kw)
                 ;; Reconstruct active formatting elements before inserting any
                 ;; new element (WHATWG in-body), so mis-nested formatting that
-                ;; was implicitly closed reopens around the new element.
-                [document stack afe] (reconstruct-active-formatting document stack afe)
+                ;; was implicitly closed reopens around the new element --
+                ;; unless the table insertion modes own this tag, which never
+                ;; take that step (see `inserted-by-table-mode?`).
+                [document stack afe] (if (inserted-by-table-mode? document stack tag-kw)
+                                       [document stack afe]
+                                       (reconstruct-active-formatting document stack afe))
                 [id document] (dom/create-element document tag)
                 document (-> document
                              (apply-attrs id attrs)
-                             (dom/append-child (peek stack) id))
+                             ;; Asked after reconstructing, for the reason
+                             ;; spelled out in the `:text` case above.
+                             (insert-node stack id
+                                          (foster-parented-element? document stack tag-kw attrs)))
                 afe (if (contains? formatting-tags tag-kw)
                       (push-afe document afe id)
                       afe)
@@ -1274,7 +1582,8 @@
                   ;; the author's own `</p>` with nothing to close. Three
                   ;; corpus cases turned on this one rule.
                   (let [[p-id document] (dom/create-element document :p)
-                        document (dom/append-child document (peek stack) p-id)]
+                        document (insert-node document stack p-id
+                                              (in-table-context? document stack))]
                     (recur document stack afe (next tokens)))
                   (recur document
                          (if match-idx (subvec stack 0 match-idx) stack)
