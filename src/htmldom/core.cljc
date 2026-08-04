@@ -359,16 +359,23 @@
           ;; trailing `/` on an ordinary element like `<div/>` is ignored --
           ;; the element still needs, and will be matched against, a real
           ;; closing tag later.
-          body (str/trim (if (and (str/ends-with? body "/")
-                                   (not (unquoted-value-tail? (subs body 0 (dec (count body))))))
-                            (subs body 0 (dec (count body)))
-                            body))
+          slash? (and (str/ends-with? body "/")
+                      (not (unquoted-value-tail? (subs body 0 (dec (count body))))))
+          body (str/trim (if slash? (subs body 0 (dec (count body))) body))
           [tag attr-text] (str/split body #"\s+" 2)
           tag (str/lower-case (or tag ""))
           self? (contains? void-tags tag)]
       (if closing?
         {:type :end :tag tag}
-        {:type :start :tag tag :attrs (attrs (or attr-text "")) :self? self?}))
+        ;; `:slash?` is kept separately from `:self?`: in HTML a trailing
+        ;; slash on a non-void tag is IGNORED (`<div/>` opens a div), but in
+        ;; FOREIGN content (inside <svg>/<math>) it really does close the
+        ;; element. The tokenizer cannot know which context it is in, so it
+        ;; reports the fact and the tree builder decides.
+        (cond-> {:type :start :tag tag :attrs (attrs (or attr-text "")) :self? self?}
+          ;; only when present: a trailing slash is exceptional information,
+          ;; and several tests legitimately compare whole token maps.
+          slash? (assoc :slash? true))))
     ;; Whitespace COLLAPSING is deliberately NOT done here anymore -- it
     ;; depends on whether a <pre> ancestor is currently open, which this
     ;; stateless, stack-free tokenizing pass has no way to know (unlike
@@ -1007,6 +1014,59 @@
           (and (contains? special-tags tag)
                (not (contains? walk-through-tags tag))) nil
           :else (recur (dec i)))))))
+
+(def ^:private foreign-root-tags
+  "Elements whose subtree is parsed as FOREIGN content (SVG or MathML)
+   rather than HTML."
+  #{:svg :math})
+
+(def ^:private html-integration-tags
+  "Foreign elements whose children are parsed as ordinary HTML again --
+   the spec's HTML integration points (plus the MathML text integration
+   points, which behave the same way for this parser's purposes).
+
+   Measured in Brave: `<svg><foreignObject><div>html</div></foreignObject>`
+   keeps the <div> INSIDE, in the HTML namespace, where the same <div>
+   directly inside <svg> breaks out."
+  #{:foreignobject :desc :title :mi :mo :mn :ms :mtext :annotation-xml})
+
+(def ^:private foreign-breakout-tags
+  "HTML start tags that terminate foreign content: the spec's list for
+   'any other start tag' in the in-foreign-content insertion mode. Seeing
+   one pops every open foreign element and re-processes the tag as HTML.
+
+   Measured in Brave rather than taken from memory -- and the measurement
+   corrected an assumption: `span` IS on this list, so
+   `<svg><circle></circle><span>in</span></svg>` puts the span OUTSIDE the
+   svg, not inside it as a foreign element. `<svg><g><div>x</div></g>tail`
+   pops the <g> as well, so the trailing text lands at top level rather
+   than back inside the svg."
+  #{:b :big :blockquote :body :br :center :code :dd :div :dl :dt :em :embed
+    :h1 :h2 :h3 :h4 :h5 :h6 :head :hr :i :img :li :listing :menu :meta
+    :nobr :ol :p :pre :ruby :s :small :span :strong :strike :sub :sup
+    :table :tt :u :ul :var})
+
+(defn- foreign-context?
+  "Whether the current insertion point is inside foreign content: the
+   nearest enclosing foreign root (<svg>/<math>) is not shadowed by an
+   HTML integration point."
+  [document stack]
+  (loop [i (dec (count stack))]
+    (when (pos? i)
+      (let [tag (get-in document [:nodes (nth stack i) :tag])]
+        (cond
+          (contains? html-integration-tags tag) false
+          (contains? foreign-root-tags tag) true
+          :else (recur (dec i)))))))
+
+(defn- pop-out-of-foreign
+  "Pops the stack until the insertion point is no longer foreign, for the
+   breakout rule. Never pops the root."
+  [document stack]
+  (loop [stack stack]
+    (if (and (> (count stack) 1) (foreign-context? document stack))
+      (recur (pop stack))
+      stack)))
 
 (defn- auto-close-stack
   "Repeatedly pops `stack` while the incoming `tag-kw` closes something
@@ -1753,6 +1813,21 @@
 
           :start
           (let [tag-kw (keyword tag)
+                ;; FOREIGN CONTENT (inside <svg>/<math>), two rules, both
+                ;; measured in Brave before implementing:
+                ;;
+                ;; 1. an HTML tag on the breakout list terminates foreign
+                ;;    content entirely -- every open foreign element is
+                ;;    popped and the tag is then processed as ordinary HTML
+                ;;    (`<svg><g><div>x</div></g>tail` leaves `tail` at top
+                ;;    level, not back inside the <svg>);
+                ;; 2. a trailing slash really closes the element, unlike in
+                ;;    HTML where `<div/>` opens a div.
+                foreign? (foreign-context? document stack)
+                stack (if (and foreign? (contains? foreign-breakout-tags tag-kw))
+                        (pop-out-of-foreign document stack)
+                        stack)
+                foreign? (and foreign? (not (contains? foreign-breakout-tags tag-kw)))
                 ;; Optional-end-tag auto-closing (see `auto-close-tags`/
                 ;; `auto-close-stack`): if the innermost currently-open
                 ;; element (top of the stack) is one this new start tag
@@ -1825,7 +1900,11 @@
                                 (cons (assoc (first remaining) :text stripped) (next remaining))
                                 (next remaining)))
                             remaining)]
-            (recur document (if self? stack (conj stack id)) afe remaining))
+            (recur document
+                   (if (or self? (and foreign? (:slash? (first tokens))))
+                     stack
+                     (conj stack id))
+                   afe remaining))
 
           :end
           (let [tag-kw (keyword tag)]

@@ -1,6 +1,6 @@
 (ns htmldom.core-test
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
@@ -1947,3 +1947,38 @@
         kids (:children (dom/comment-tree doc))]
     (is (= [:p :comment :p] (mapv #(or (:tag %) (:node/type %)) kids)))
     (is (= "" (:text (second kids))))))
+
+(deftest foreign-content-self-closes-and-breaks-out
+  ;; Two rules that only apply inside <svg>/<math>, both measured in Brave
+  ;; before implementing.
+  (testing "a trailing slash really closes the element in foreign content"
+    ;; In HTML it is ignored: <div/> opens a div. In SVG it does not.
+    (let [tree (dom/tree (html/parse-into-document "<svg><rect/><circle/></svg>after"))
+          [svg text] (:children tree)]
+      (is (= :svg (:tag svg)))
+      (is (= [:rect :circle] (mapv :tag (:children svg)))
+          "siblings, not nested")
+      (is (= "after" text))))
+  (testing "an HTML tag on the breakout list terminates foreign content"
+    ;; Measured: the <g> is popped too, so the trailing text lands at top
+    ;; level rather than back inside the <svg>.
+    (let [tree (dom/tree (html/parse-into-document "<svg><g><div>x</div></g>tail</svg>"))
+          [svg div text] (:children tree)]
+      (is (= :svg (:tag svg)))
+      (is (= [:g] (mapv :tag (:children svg))))
+      (is (= :div (:tag div)) "the div is a SIBLING of the svg")
+      (is (= "tail" text))))
+  (testing "span is on the breakout list, which is not obvious"
+    ;; This corrected an assumption while probing: `span` looks like a
+    ;; harmless inline and is nonetheless a breakout tag, so it leaves the
+    ;; svg rather than becoming a foreign element inside it.
+    (let [tree (dom/tree (html/parse-into-document "<svg><circle></circle><span>in</span></svg>"))]
+      (is (= [:svg :span] (mapv :tag (:children tree))))))
+  (testing "an HTML integration point keeps HTML inside"
+    (let [tree (dom/tree (html/parse-into-document
+                          "<svg><foreignObject><div>html</div></foreignObject></svg>"))
+          svg (first (:children tree))
+          fo (first (:children svg))]
+      (is (= :foreignobject (:tag fo)))
+      (is (= [:div] (mapv :tag (:children fo)))
+          "the div stays inside, where the same div directly in <svg> breaks out"))))
