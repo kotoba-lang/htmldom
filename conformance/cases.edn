@@ -1,0 +1,453 @@
+;; Parser conformance corpus: each case's markup is parsed BOTH by
+;; `htmldom.core/parse-into-document` and by a real Blink browser (Chrome;
+;; Brave is the same engine), and the two resulting TREES are compared on
+;; shape -- element tag names and nesting depth in document order, plus text
+;; nodes normalised for whitespace, plus comments.
+;;
+;; The browser parses each case with `innerHTML` on a detached <div>, which
+;; is the HTML fragment parsing algorithm with a <div> context element --
+;; the same job `parse-into-document` does. See conformance/README.md.
+;;
+;; A FAILING CASE IS A MEASUREMENT, NOT A BUG REPORT. This parser openly
+;; says it is not WHATWG-compliant, and several groups here are known,
+;; documented scope cuts (comments have no node type in kotoba.wasm.dom at
+;; all; the adoption agency's furthest-block path is deferred to L3; there
+;; is no html/head/body synthesis). They are in the corpus precisely so the
+;; number tells the truth about them.
+;;
+;; Keep the markup EXACT: incidental indentation inside a case's html string
+;; becomes real whitespace text nodes in both trees. Whitespace is only
+;; present where a case is deliberately testing it.
+
+[;; ---- tables: implied tbody, optional end tags, foster parenting -------
+
+ {:id :table/implied-tbody
+  :group :table
+  :html "<table><tr><td>a</td></tr></table>"}
+
+ {:id :table/implied-tbody-two-rows
+  :group :table
+  :html "<table><tr><td>a</td></tr><tr><td>b</td></tr></table>"}
+
+ {:id :table/optional-cell-end-tags
+  :group :table
+  :html "<table><tr><td>A<td>B<tr><td>C</table>"}
+
+ {:id :table/explicit-tbody
+  :group :table
+  :html "<table><tbody><tr><td>a</td></tr></tbody></table>"}
+
+ {:id :table/thead-tbody-tfoot
+  :group :table
+  :html "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table>"}
+
+ {:id :table/thead-then-bare-rows
+  :group :table
+  :html "<table><thead><tr><th>h</th></tr></thead><tr><td>d</td></tr></table>"}
+
+ {:id :table/caption
+  :group :table
+  :html "<table><caption>Cap</caption><tr><td>a</td></tr></table>"}
+
+ {:id :table/colgroup
+  :group :table
+  :html "<table><colgroup><col><col></colgroup><tr><td>a</td></tr></table>"}
+
+ {:id :table/th-and-td-optional-ends
+  :group :table
+  :html "<table><tr><th>H<td>D</table>"}
+
+ {:id :table/td-without-tr
+  :group :table
+  :html "<table><td>x</td></table>"}
+
+ {:id :table/foster-parent-text
+  :group :table
+  :html "<table>stray<tr><td>x</td></tr></table>"}
+
+ {:id :table/foster-parent-element
+  :group :table
+  :html "<table><div>d</div><tr><td>x</td></tr></table>"}
+
+ {:id :table/foster-parent-formatting
+  :group :table
+  :html "<table><b>bold</b><tr><td>x</td></tr></table>"}
+
+ {:id :table/nested-table
+  :group :table
+  :html "<table><tr><td><table><tr><td>in</td></tr></table></td></tr></table>"}
+
+ {:id :table/unclosed-at-eof
+  :group :table
+  :html "<table><tr><td>x"}
+
+ {:id :table/whitespace-between-rows
+  :group :table
+  :html "<table>\n<tr><td>a</td></tr>\n</table>"}
+
+ ;; ---- lists: optional end tags, nesting ---------------------------------
+
+ {:id :list/li-optional-end
+  :group :list
+  :html "<ul><li>a<li>b<li>c</ul>"}
+
+ {:id :list/nested-ul-inside-li
+  :group :list
+  :html "<ul><li>a<ul><li>b</li></ul></li></ul>"}
+
+ {:id :list/nested-ul-optional-end
+  :group :list
+  :html "<ul><li>a<ul><li>b</ul><li>c</ul>"}
+
+ {:id :list/dl-dt-dd-optional-end
+  :group :list
+  :html "<dl><dt>t1<dd>d1<dt>t2<dd>d2</dl>"}
+
+ {:id :list/ol-explicit
+  :group :list
+  :html "<ol><li>1</li><li>2</li></ol>"}
+
+ {:id :list/li-outside-list
+  :group :list
+  :html "<li>a<li>b"}
+
+ ;; ---- paragraphs: the optional </p> and what closes it ------------------
+
+ {:id :p/closed-by-div
+  :group :paragraph
+  :html "<p>a<div>b</div>"}
+
+ {:id :p/closed-by-p
+  :group :paragraph
+  :html "<p>a<p>b"}
+
+ {:id :p/closed-by-list
+  :group :paragraph
+  :html "<p>a<ul><li>b</li></ul>"}
+
+ {:id :p/hr-closes-p
+  :group :paragraph
+  :html "<p>a<hr>b"}
+
+ {:id :p/span-does-not-close
+  :group :paragraph
+  :html "<p>a<span>b</span>c</p>"}
+
+ {:id :p/stray-end-tag
+  :group :paragraph
+  :html "<p>a</p></p>b"}
+
+ {:id :p/nested-p-explicit-end
+  :group :paragraph
+  :html "<div><p>a</p><p>b</p></div>"}
+
+ ;; ---- misnested formatting: active formatting list + adoption agency ----
+
+ {:id :fmt/well-formed-nesting
+  :group :formatting
+  :html "<b>a<i>b</i>c</b>"}
+
+ {:id :fmt/misnested-b-i
+  :group :formatting
+  :html "<b>1<i>2</b>3</i>"}
+
+ {:id :fmt/misnested-em-strong
+  :group :formatting
+  :html "<em>a<strong>b</em>c</strong>"}
+
+ {:id :fmt/misnested-no-trailing-end
+  :group :formatting
+  :html "<b>x<i>y</b>z"}
+
+ {:id :fmt/unclosed-at-eof
+  :group :formatting
+  :html "<b>bold<i>both"}
+
+ {:id :fmt/reopen-across-block
+  :group :formatting
+  :html "<div><b>x</div>y"}
+
+ {:id :fmt/block-in-inline
+  :group :formatting
+  :html "<b><p>x</p></b>"}
+
+ {:id :fmt/anchor-in-anchor
+  :group :formatting
+  :html "<a href=\"/1\">1<a href=\"/2\">2</a>"}
+
+ {:id :fmt/font-misnested
+  :group :formatting
+  :html "<font color=\"red\">a<b>b</font>c</b>"}
+
+ {:id :fmt/three-deep-misnested
+  :group :formatting
+  :html "<b><i><u>x</b>y</u>z</i>"}
+
+ {:id :fmt/end-tag-with-no-open
+  :group :formatting
+  :html "<p>a</b>b</p>"}
+
+ ;; ---- raw text and RCDATA ----------------------------------------------
+
+ {:id :raw/script-with-markup
+  :group :rawtext
+  :html "<script>var a = \"<b>x</b>\";</script>"}
+
+ {:id :raw/script-keeps-entities
+  :group :rawtext
+  :html "<script>var s = \"&amp;\";</script>"}
+
+ {:id :raw/script-unclosed
+  :group :rawtext
+  :html "<script>var a = 1;"}
+
+ {:id :raw/style-content
+  :group :rawtext
+  :html "<style>.a { color: red }</style>"}
+
+ {:id :raw/style-with-gt
+  :group :rawtext
+  :html "<style>.a > .b { color: red }</style><p>after</p>"}
+
+ {:id :raw/textarea-with-markup
+  :group :rawtext
+  :html "<textarea><b>x</b></textarea>"}
+
+ {:id :raw/textarea-leading-newline
+  :group :rawtext
+  :html "<textarea>\nvalue</textarea>"}
+
+ {:id :raw/textarea-decodes-entities
+  :group :rawtext
+  :html "<textarea>&amp;</textarea>"}
+
+ {:id :raw/title-in-flow
+  :group :rawtext
+  :html "<title>T &amp; U</title><p>after</p>"}
+
+ ;; ---- comments ----------------------------------------------------------
+
+ {:id :comment/basic
+  :group :comment
+  :html "<p>a<!-- note -->b</p>"}
+
+ {:id :comment/abrupt-empty
+  :group :comment
+  :html "<p>a</p><!--><p>after</p>"}
+
+ {:id :comment/gt-inside-body
+  :group :comment
+  :html "<div><!-- a > b --><span>x</span></div>"}
+
+ {:id :comment/doctype-in-flow
+  :group :comment
+  :html "<div><!DOCTYPE html><span>x</span></div>"}
+
+ ;; ---- character references ---------------------------------------------
+
+ {:id :entity/named-basic
+  :group :entity
+  :html "<p>&amp; &lt; &gt; &quot;</p>"}
+
+ {:id :entity/numeric-decimal-and-hex
+  :group :entity
+  :html "<p>&#65;&#x42;</p>"}
+
+ {:id :entity/nbsp-is-not-collapsible
+  :group :entity
+  :html "<p>a&nbsp;b</p>"}
+
+ {:id :entity/windows-1252-remap
+  :group :entity
+  :html "<p>&#151;</p>"}
+
+ {:id :entity/typography
+  :group :entity
+  :html "<p>&rsaquo;&hellip;&mdash;&copy;</p>"}
+
+ {:id :entity/bare-ampersand
+  :group :entity
+  :html "<p>a & b</p>"}
+
+ {:id :entity/unterminated-named
+  :group :entity
+  :html "<p>&notit;</p>"}
+
+ {:id :entity/in-attribute
+  :group :entity
+  :html "<a title=\"a&amp;b\">x</a>"}
+
+ ;; ---- attribute syntax edge cases ---------------------------------------
+
+ {:id :attr/gt-inside-quoted-value
+  :group :attribute
+  :html "<div title=\"a > b\">x</div>"}
+
+ {:id :attr/unquoted-url-trailing-slash
+  :group :attribute
+  :html "<a href=http://example.com/>x</a>"}
+
+ {:id :attr/single-quoted
+  :group :attribute
+  :html "<div class='a b'>x</div>"}
+
+ {:id :attr/unquoted-multiple
+  :group :attribute
+  :html "<div id=x class=y>z</div>"}
+
+ {:id :attr/boolean-no-value
+  :group :attribute
+  :html "<button disabled>go</button>"}
+
+ {:id :attr/uppercase-names
+  :group :attribute
+  :html "<div ID=\"x\" CLASS=\"y\">z</div>"}
+
+ {:id :attr/empty-value
+  :group :attribute
+  :html "<div id=\"\">x</div>"}
+
+ {:id :attr/duplicate-name
+  :group :attribute
+  :html "<div id=\"first\" id=\"second\">x</div>"}
+
+ {:id :attr/entity-in-unquoted-value
+  :group :attribute
+  :html "<a href=/a&amp;b>x</a>"}
+
+ {:id :attr/equals-in-unquoted-value
+  :group :attribute
+  :html "<a href=a=b>x</a>"}
+
+ ;; A `/` after an unquoted value is NOT a separator: HTML5's
+ ;; attribute-value-unquoted state appends it to the value, so both sides
+ ;; give `id="a/"`. Written expecting a divergence and measured not to have
+ ;; one -- kept because the expectation was wrong, not the parser.
+ {:id :attr/slash-after-unquoted-value
+  :group :attribute
+  :html "<div id=a/ class=b>x</div>"}
+
+ ;; The attribute axis's live control: `@click`-style names (Vue, Alpine,
+ ;; htmx) are legal HTML attribute names -- the spec forbids only
+ ;; whitespace, `/`, `>` and `=` in a name.
+ {:id :attr/framework-prefixed-name
+  :group :attribute
+  :html "<div id=\"a\" @click=\"f\">y</div>"}
+
+ ;; ---- self-closing syntax ------------------------------------------------
+
+ {:id :self/void-elements
+  :group :selfclose
+  :html "<p>a<br>b<img src=\"x\">c</p>"}
+
+ {:id :self/void-with-slash
+  :group :selfclose
+  :html "<p>a<br/>b</p>"}
+
+ {:id :self/nonvoid-slash-is-ignored
+  :group :selfclose
+  :html "<div/>x</div>"}
+
+ {:id :self/nonvoid-slash-nests
+  :group :selfclose
+  :html "<span/>a<span/>b"}
+
+ {:id :self/void-end-tag-ignored
+  :group :selfclose
+  :html "<p>a<br></br>b</p>"}
+
+ ;; ---- unclosed / stray tags --------------------------------------------
+
+ {:id :eof/unclosed-nested-blocks
+  :group :eof
+  :html "<div><section><p>x"}
+
+ {:id :eof/stray-end-tag-first
+  :group :eof
+  :html "</div>text"}
+
+ {:id :eof/mismatched-end-tag
+  :group :eof
+  :html "<div><span>x</div>y"}
+
+ {:id :eof/unmatched-lt
+  :group :eof
+  :html "<p>a < b</p>"}
+
+ {:id :eof/lt-gt-in-prose
+  :group :eof
+  :html "<p>1 < 2 and 3 > 4</p>"}
+
+ {:id :eof/lt-before-digit
+  :group :eof
+  :html "<p>a<1b</p>"}
+
+ {:id :eof/unterminated-tag
+  :group :eof
+  :html "<p>a</p><div class=\"x"}
+
+ {:id :eof/unterminated-quoted-attribute-eats-rest
+  :group :eof
+  :html "<p>a<div class=\"x>b</div>"}
+
+ ;; ---- whitespace --------------------------------------------------------
+
+ {:id :ws/between-inline-elements
+  :group :whitespace
+  :html "<p><a>one</a>\n<a>two</a></p>"}
+
+ {:id :ws/leading-and-trailing-in-block
+  :group :whitespace
+  :html "<div> x </div>"}
+
+ {:id :ws/tabs-and-newlines-in-text
+  :group :whitespace
+  :html "<div>a\tb\nc</div>"}
+
+ {:id :ws/only-whitespace-between-blocks
+  :group :whitespace
+  :html "<div>a</div>\n<div>b</div>"}
+
+ {:id :ws/pre-preserves-nested-markup
+  :group :whitespace
+  :html "<pre>a <span>b</span> c</pre>"}
+
+ ;; ---- form controls ------------------------------------------------------
+
+ {:id :form/select-options-optional-end
+  :group :form
+  :html "<select><option>a<option>b</select>"}
+
+ {:id :form/optgroup-optional-end
+  :group :form
+  :html "<select><optgroup label=\"g\"><option>a<optgroup label=\"h\"><option>b</select>"}
+
+ {:id :form/inputs
+  :group :form
+  :html "<form><input type=\"text\" value=\"v\"><input type=\"checkbox\" checked></form>"}
+
+ {:id :form/label-and-button
+  :group :form
+  :html "<label for=\"i\">L</label><button type=\"submit\">Go</button>"}
+
+ ;; ---- misc ---------------------------------------------------------------
+
+ {:id :misc/uppercase-tag-names
+  :group :misc
+  :html "<DIV><SPAN>x</SPAN></DIV>"}
+
+ {:id :misc/deep-nesting
+  :group :misc
+  :html "<div><div><div><span>x</span></div></div></div>"}
+
+ {:id :misc/body-tag-in-flow
+  :group :misc
+  :html "<div><body>x</body></div>"}
+
+ {:id :misc/unknown-element
+  :group :misc
+  :html "<my-widget><p>x</p></my-widget>"}
+
+ {:id :misc/heading-siblings
+  :group :misc
+  :html "<h1>A</h1><h2>B</h2><p>c</p>"}]

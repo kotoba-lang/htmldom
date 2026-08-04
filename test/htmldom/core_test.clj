@@ -1576,3 +1576,63 @@
                   (str/join ""))]
     (is (str/includes? text "&notarealentity;")
         "an unknown entity is still left alone rather than guessed at")))
+
+(deftest bare-lt-in-prose-is-literal-text
+  ;; Found by conformance/ (case `eof/lt-gt-in-prose`): `<p>1 < 2 and 3 >
+  ;; 4</p>` tokenized to a start tag named "2" with an attribute "and", and
+  ;; `2 and 3 >` vanished from the document -- the scan took the `<` before
+  ;; ` 2` as a tag open and found the `>` after `3` as its terminator. Real
+  ;; HTML5's tag-open state only enters markup for ASCII alpha, `/` + alpha,
+  ;; `!` or `?`; anything else emits the `<` as an ordinary character.
+  (is (= [{:type :start :tag "p" :attrs {} :self? false}
+          {:type :text :text "1 < 2 and 3 > 4"}
+          {:type :end :tag "p"}]
+         (html/tokenize "<p>1 < 2 and 3 > 4</p>"))
+      "and it stays in ONE text node, as a browser builds it")
+  (is (= [{:type :start :tag "p" :attrs {} :self? false}
+          {:type :text :text "a < b"}
+          {:type :end :tag "p"}]
+         (html/tokenize "<p>a < b</p>")))
+  (is (= [{:type :start :tag "p" :attrs {} :self? false}
+          {:type :text :text "a<1b"}
+          {:type :end :tag "p"}]
+         (html/tokenize "<p>a<1b</p>"))
+      "a digit is not an ASCII alpha either")
+  (is (= [{:type :start :tag "p" :attrs {} :self? false}
+          {:type :text :text "x"}
+          {:type :end :tag "p"}]
+         (html/tokenize "<p>x</p>"))
+      "and ordinary markup is untouched"))
+
+(deftest unterminated-tag-at-eof-drops-the-partial-tag
+  ;; Found by conformance/ (case `eof/unterminated-tag`): `<div class="x`
+  ;; with no closing `>` leaked the raw markup `div class="x` into the
+  ;; document as a visible text node. WHATWG's eof-in-tag parse error drops
+  ;; the partial tag and everything consumed into it.
+  (is (= [{:type :start :tag "p" :attrs {} :self? false}
+          {:type :text :text "a"}
+          {:type :end :tag "p"}]
+         (html/tokenize "<p>a</p><div class=\"x")))
+  (is (= [{:type :text :text "a"}]
+         (html/tokenize "a<div"))))
+
+(deftest nbsp-survives-whitespace-collapsing
+  ;; Found by conformance/ (case `entity/nbsp-is-not-collapsible`): the
+  ;; browser reported codepoints 97/160/98 for `<p>a&nbsp;b</p>` and this
+  ;; parser 97/32/98. Collapsing used `[^\S\n]`, and `\s` also matches
+  ;; U+00A0 -- so the entity was decoded correctly and then immediately
+  ;; rewritten back into a collapsible ordinary space, destroying the one
+  ;; thing `&nbsp;` exists to do.
+  (let [doc (html/parse-into-document "<p>a&nbsp;b</p>")
+        text (->> (vals (:nodes doc))
+                  (filter #(= :text (:node/type %)))
+                  (map :text)
+                  (str/join ""))]
+    (is (= [97 160 98] (mapv int text))))
+  (let [doc (html/parse-into-document "<p>a  \t b</p>")
+        text (->> (vals (:nodes doc))
+                  (filter #(= :text (:node/type %)))
+                  (map :text)
+                  (str/join ""))]
+    (is (= "a b" text)
+        "ordinary spaces and tabs still collapse")))
