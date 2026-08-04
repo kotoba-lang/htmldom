@@ -22,7 +22,7 @@ default-selected initialization). See the `htmldom.core` docstring.
 |---|---|
 | Role | ui-substrate |
 | Tests | `clojure -M:test` |
-| WHATWG HTML compatibility | not a goal (trusted subset only) — **measured at 92% tree shape** vs a real headless Blink browser, see `conformance/` |
+| WHATWG HTML compatibility | not a goal (trusted subset only) — **measured at 94% tree shape** vs a real headless Blink browser, see `conformance/` |
 
 ## Test
 

@@ -146,6 +146,53 @@
   (is (= [[:div [:em "x"]] [:em [:widget "y"]]]
          (shape "<div><em>x</div><widget>y</widget>"))))
 
+;; ------------------------------------------------------------
+;; Scope markers (`afe-marker-tags` / `prune-cleared-markers`). Every
+;; expected tree below was measured in Brave 151.
+
+(deftest a-cell-blocks-formatting-open-outside-the-table
+  ;; The marker's forward half. The <b> is still open and is still
+  ;; foster-parented out in front of the table, but it is not recreated
+  ;; inside the cell -- reconstruction stops at the marker the <td> pushed.
+  (is (= [[:b "bold"] [:table [:tbody [:tr [:td "x"]]]]]
+         (shape "<table><b>bold<tr><td>x")))
+  ;; A caption pushes one too.
+  (is (= [[:b "bold"]
+          [:table [:caption "cap"] [:tbody [:tr [:td "x"]]]]]
+         (shape "<table><b>bold<caption>cap</caption><tr><td>x"))))
+
+(deftest closing-a-cell-clears-formatting-opened-inside-it
+  ;; The marker's backward half: "clear the list of active formatting
+  ;; elements up to the last marker". The <b> opened in the first cell does
+  ;; not leak into the second, nor out past the table -- in both cases the
+  ;; cell was closed implicitly, which is the path that has no end tag to
+  ;; hang the clearing on.
+  (is (= [[:table [:tbody [:tr [:td [:b "in"]] [:td "next"]]]]]
+         (shape "<table><tr><td><b>in<td>next")))
+  (is (= [[:table [:tbody [:tr [:td [:b "in"]]]]] "after"]
+         (shape "<table><tr><td><b>in</td></tr></table>after"))))
+
+(deftest clearing-a-cell-keeps-formatting-pushed-before-the-marker
+  ;; The case that pins the marker's POSITION rather than its existence:
+  ;; <b> is pushed before the table (so before the marker) and <i> inside
+  ;; the first cell (so after it). Closing that cell must drop the <i> and
+  ;; keep the <b> -- the second cell gets a bare text node and the trailing
+  ;; "d" is inside the <b> but not inside an <i>. A marker implemented as
+  ;; "empty the list" or "keep everything" fails one half each.
+  (is (= [[:b "a"
+           [:table [:tbody [:tr [:td [:i "b"]] [:td "c"]]]]
+           "d"]]
+         (shape "<b>a<table><tr><td><i>b</td><td>c</table>d"))))
+
+(deftest markers-do-not-disturb-formatting-with-no-table-in-sight
+  ;; Regression guard for the pruning being cheap and invisible: with no
+  ;; cell anywhere, the list has no markers and every shape above the
+  ;; adoption agency behaves exactly as before.
+  (is (= [[:b "p" [:i "s"]] [:i "e"]] (shape "<b>p<i>s</b>e</i>")))
+  (is (= [[:div [:b "x"]] [:b "y"]] (shape "<div><b>x</div>y")))
+  (is (= [[:table [:tbody [:tr [:td [:b "x"] "y"] [:td "z"]]]]]
+         (shape "<table><tr><td><b>x</b>y<td>z"))))
+
 (deftest furthest-block-fallback-is-naive-nesting
   ;; L2 documented limitation, locked here so a future L3 reparenting
   ;; implementation is an intentional change, not a silent one. <b><p>x</b>
