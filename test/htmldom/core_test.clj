@@ -1907,3 +1907,28 @@
   (is (= [[:tr "t"]] (parsed-shape "<tr>t")))
   (is (= [[:td "x"]] (parsed-shape "<td>x</td>"))
       "no implied tbody/tr without a table to put them in"))
+
+(deftest comments-become-real-nodes-and-keep-the-text-around-them-separate
+  ;; Comments used to be discarded by the tokenizer, for the honest reason
+  ;; that there was nowhere to put one: kotoba.wasm.dom had no comment node
+  ;; type until 2026-08-04.
+  ;;
+  ;; Discarding is not neutral. The text on either side becomes ONE node
+  ;; where a browser keeps two -- so the bug was a corrupted text structure,
+  ;; not just a missing node, and both halves are asserted here.
+  (let [doc (html/parse-into-document "<p>a<!-- note -->b</p>")
+        p (first (:children (dom/comment-tree doc)))]
+    (is (= ["a" {:node/type :comment :text " note "} "b"] (:children p)))
+    (is (= ["a" "b"] (:children (first (:children (dom/tree doc)))))
+        "the LAYOUT view drops the comment and still keeps the text separate")
+    (is (= "ab" (dom/text-content doc)) "textContent ignores it, as in a real DOM")))
+
+(deftest an-abrupt-closing-comment-is-empty-not-a-swallowed-document
+  ;; `<!-->` and `<!--->` reuse the marker's own dashes as the closer, so
+  ;; they are complete EMPTY comments. Measured in Brave. The tokenizer
+  ;; already handled the scanning; this pins the emitted data as empty
+  ;; rather than as whatever followed.
+  (let [doc (html/parse-into-document "<p>before</p><!--><p>after</p>")
+        kids (:children (dom/comment-tree doc))]
+    (is (= [:p :comment :p] (mapv #(or (:tag %) (:node/type %)) kids)))
+    (is (= "" (:text (second kids))))))
