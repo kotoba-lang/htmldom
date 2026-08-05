@@ -1265,6 +1265,17 @@
    with no table anywhere to justify it."
   {:caption  #{:table}
    :colgroup #{:table}
+   ;; A `<col>` is the one table-structure tag that can arrive with its own
+   ;; wrapper already open, so `:colgroup` is a stop as well as `:table`:
+   ;; consecutive bare `<col>`s must share ONE synthesised colgroup, and
+   ;; popping to the table between them would give each its own. Measured
+   ;; in Brave 151 (2026-08-05), `<table><col><col><col><tr><td>a` is one
+   ;; `colgroup` holding three `col`s. The `:table` stop is what puts a
+   ;; `<col>` that arrives AFTER a row back at table level:
+   ;; `<table><tr><td>a</td></tr><col>` gives `tbody` then a SIBLING
+   ;; `colgroup`, and `<table><thead>...</thead><col><tbody>...` gives
+   ;; thead, colgroup, tbody -- both measured.
+   :col      #{:colgroup :table}
    :tbody    #{:table}
    :thead    #{:table}
    :tfoot    #{:table}
@@ -1363,6 +1374,25 @@
       [document stack]
       (and (= tag-kw :tr) (= :table (top document stack)))
       (open document stack :tbody)
+
+      ;; A bare `<col>` gets the `<colgroup>` real HTML5 inserts around it
+      ;; ("in table" mode: insert a colgroup with no attributes, switch to
+      ;; "in column group", reprocess). Measured in Brave 151 (2026-08-05),
+      ;; `<table><col style="width:200px"><col><tr><td>a</td><td>b</td>` is
+      ;; table > colgroup > col,col + tbody > tr > td,td -- this parser had
+      ;; the two `col`s directly under the `table` and no colgroup at all,
+      ;; which cssom's conformance corpus scored as one box the browser has
+      ;; and this side has not, plus 14 computed-style values it could not
+      ;; zip against anything.
+      ;;
+      ;; No `<colgroup>` is opened when one already IS open -- see
+      ;; table-clear-targets, which stops there for a `:col` so the second
+      ;; and third bare `<col>` land in the first one's group. An explicit
+      ;; `<colgroup></colgroup>` followed by a bare `<col>` gets TWO
+      ;; colgroups (measured), which falls out of the same rule: the
+      ;; explicit one was popped by its own end tag.
+      (and (= tag-kw :col) (= :table (top document stack)))
+      (open document stack :colgroup)
 
       (contains? #{:td :th} tag-kw)
       (let [[document stack] (if (= :table (top document stack))

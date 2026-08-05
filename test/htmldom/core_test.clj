@@ -2055,3 +2055,43 @@
     (let [tree (dom/tree (html/parse-into-document "<div><head><title>t</title></head>y</div>"))
           div (first (:children tree))]
       (is (= [:title "y"] (mapv #(if (string? %) % (:tag %)) (:children div)))))))
+
+(deftest a-bare-col-gets-the-implied-colgroup-a-real-parser-inserts
+  ;; Every shape below was measured in headless Brave 151 on 2026-08-05, by
+  ;; assigning the markup to `innerHTML` and walking the resulting tree.
+  ;;
+  ;; This is where the divergence was FOUND rather than where it was
+  ;; visible: cssom's conformance corpus reported one `colgroup` box the
+  ;; browser has and that side had not (`:table/col-width-sizes-a-column`),
+  ;; plus 14 computed-style values it could not zip against anything --
+  ;; and the cause was here, in the parser, not in the layout engine.
+
+  ;; The corpus's own shape: two bare `<col>`s share ONE synthesised group.
+  (is (= [[:table [:colgroup [:col] [:col]] [:tbody [:tr [:td "a"] [:td "b"]]]]]
+         (parsed-shape (str "<table><col style=\"width:200px\"><col>"
+                            "<tr><td>a</td><td>b</td></tr></table>"))))
+  ;; Three of them, still one group -- the group is opened once and the
+  ;; later `<col>`s find it already open.
+  (is (= [[:table [:colgroup [:col] [:col] [:col]] [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape "<table><col><col><col><tr><td>a</td></tr></table>")))
+  ;; An EXPLICIT `<colgroup>` is left exactly as it was: nothing is
+  ;; synthesised around a `<col>` that already has a group.
+  (is (= [[:table [:colgroup [:col]] [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape "<table><colgroup><col></colgroup><tr><td>a</td></tr></table>")))
+  ;; ... but an explicit EMPTY one, already closed by its own end tag, does
+  ;; not adopt a following bare `<col>`: Brave reports two colgroups.
+  (is (= [[:table [:colgroup] [:colgroup [:col]] [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape "<table><colgroup></colgroup><col><tr><td>a</td></tr></table>")))
+  ;; A `<col>` that arrives after a ROW pops back to the table and gets its
+  ;; group there, as a SIBLING of the row group rather than inside it.
+  (is (= [[:table [:tbody [:tr [:td "a"]]] [:colgroup [:col]]]]
+         (parsed-shape "<table><tr><td>a</td></tr><col></table>")))
+  ;; Same rule between two row groups, which is what makes the `:table`
+  ;; stop necessary as well as the `:colgroup` one.
+  (is (= [[:table [:thead [:tr [:td "h"]]] [:colgroup [:col]]
+           [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape (str "<table><thead><tr><td>h</td></tr></thead><col>"
+                            "<tbody><tr><td>a</td></tr></tbody></table>"))))
+  ;; and after a `<caption>`, which is popped the same way.
+  (is (= [[:table [:caption "c"] [:colgroup [:col]] [:tbody [:tr [:td "a"]]]]]
+         (parsed-shape "<table><caption>c</caption><col><tr><td>a</td></tr></table>"))))
