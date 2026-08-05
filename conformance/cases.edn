@@ -53,6 +53,20 @@
   :group :table
   :html "<table><colgroup><col><col></colgroup><tr><td>a</td></tr></table>"}
 
+ {:id :table/bare-col-gets-an-implied-colgroup
+  :group :table
+  ;; A `<col>` with no `<colgroup>` around it: "in table" mode inserts one
+  ;; with no attributes and reprocesses, and CONSECUTIVE bare cols share
+  ;; it. Found by cssom's own conformance corpus, which reported a colgroup
+  ;; box the browser has and this parser had not.
+  :html "<table><col style=\"width:200px\"><col><tr><td>a</td><td>b</td></tr></table>"}
+
+ {:id :table/bare-col-after-a-row-pops-back-to-the-table
+  :group :table
+  ;; The other half: the implied colgroup is a SIBLING of the row group,
+  ;; not a child of it.
+  :html "<table><thead><tr><td>h</td></tr></thead><col><tbody><tr><td>a</td></tr></tbody></table>"}
+
  {:id :table/th-and-td-optional-ends
   :group :table
   :html "<table><tr><th>H<td>D</table>"}

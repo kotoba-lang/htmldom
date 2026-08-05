@@ -273,7 +273,18 @@
                   :else
                   (do (vswap! out conj {:k "e" :d depth
                                         :n (name (:tag c))
-                                        :a (into {} (map (fn [[k v]] [(name k) (str v)]))
+                                        ;; `:style/<prop>` keys are dropped
+                                        ;; HERE rather than in norm-attrs,
+                                        ;; because `name` erases the
+                                        ;; namespace that identifies them:
+                                        ;; `(name :style/width)` is plain
+                                        ;; `width`, and an element with an
+                                        ;; inline style was reporting a
+                                        ;; phantom attribute of that name.
+                                        :a (into {}
+                                                 (comp (remove (fn [[k _]]
+                                                                 (= "style" (namespace k))))
+                                                       (map (fn [[k v]] [(name k) (str v)])))
                                                  (:attrs c))})
                       (rec c (inc depth))))))]
       (rec root 0))
@@ -316,7 +327,13 @@
      evaluator in it. Comparing a parsed map against a browser's raw string
      would score the cascade bridge, not the parser.
    - `style-inline` / `style-inline-important`: the engine-side halves of
-     the same thing.
+     the same thing. So is every `:style/<prop>` key `apply-attrs` writes
+     beside them, which the tree walk above drops by NAMESPACE -- `name`
+     erases it, so `(name :style/width)` is plain `width` and an element
+     carrying an inline style was reporting a phantom attribute of that
+     name. Found by `:table/bare-col-gets-an-implied-colgroup`, the first
+     case in this corpus to put an inline style on an element with no other
+     attributes.
    - `default-value` / `default-checked` / `default-selected`: synthesised
      by `initialize-form-defaults`. In a real browser these are DOM
      PROPERTIES (`el.defaultValue`), never content attributes, so the oracle

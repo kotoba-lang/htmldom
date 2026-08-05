@@ -58,6 +58,38 @@ were in far better shape than "trusted subset only" suggests — the parser
 had quietly grown most of an in-body insertion mode. The remaining failures
 are not scattered; they are two causes.
 
+### 2026-08-05: the implied `<colgroup>`, found by a DOWNSTREAM corpus
+
+A bare `<col>` — one with no `<colgroup>` written around it — was left as a
+direct child of the `<table>`. Real HTML5's "in table" insertion mode
+inserts a `colgroup` with no attributes and reprocesses, and this parser
+had the `<tbody>` half of that scaffolding but not the column half.
+
+It was not found here. It was found by **cssom's** conformance corpus,
+whose geometry axis reported one `colgroup` box Brave has and that side had
+not, and whose computed-style axis had to EXCLUDE 14 values because the two
+sides disagreed on how many `colgroup` elements existed. Measured in Brave
+151 before implementing anything, by assigning each shape to `innerHTML`
+and walking the result:
+
+| markup | Brave |
+|---|---|
+| `<table><col><col><tr><td>a` | one `colgroup` holding BOTH cols |
+| `<table><col><col><col><tr><td>a` | still one, holding three |
+| `<table><colgroup><col></colgroup>…` | untouched — nothing synthesised |
+| `<table><colgroup></colgroup><col>…` | TWO colgroups |
+| `<table><tr><td>a</td></tr><col>` | `tbody`, then a SIBLING `colgroup` |
+| `<table><thead>…</thead><col><tbody>…` | thead, colgroup, tbody |
+| `<table><caption>c</caption><col>…` | caption, colgroup, tbody |
+
+All seven fall out of two lines: a `:col` entry in `table-clear-targets`
+stopping at `:colgroup` **and** `:table` (so consecutive cols share a
+group, and one arriving later pops back to table level), and a branch in
+`maybe-insert-implied-table-structure` that opens a `colgroup` when the
+stack top is the table itself. Tree shape 137/137 → **139/139** with two
+new cases; downstream, cssom's geometry went 1722/1766 → 1723/1766 and its
+14 excluded computed-style values became 14 comparable ones that agree.
+
 ## The two causes, in order of size
 
 **1. Comments have no node type (3 cases).** `kotoba.wasm.dom` knows only
@@ -279,7 +311,15 @@ only visible because this class was written narrowly first.)
 - **`style` attributes.** `apply-attrs` folds them into `:style-inline` /
   `:style-inline-important` plus a parsed map for the cascade — the reason
   this repo contains a `calc()` evaluator. Comparing a parsed map against a
-  browser's raw string would score the cascade bridge, not the parser.
+  browser's raw string would score the cascade bridge, not the parser. The
+  `:style/<prop>` keys written beside them are dropped by NAMESPACE while
+  the tree is walked, not by name later: `name` erases the namespace, so
+  `(name :style/width)` is plain `width` and an element carrying an inline
+  style was reporting a phantom `width` attribute the browser cannot have.
+  Found by `:table/bare-col-gets-an-implied-colgroup` on 2026-08-05, the
+  first case here to put an inline style on an element with no other
+  attributes — one more instance of the harness bug the normalisation
+  section above describes.
 - **`default-value` / `default-checked` / `default-selected`, and `value` on
   `<select>`/`<textarea>`, `selected` on `<option>`.** Synthesised by
   `initialize-form-defaults`. In a browser these are DOM *properties*, never
