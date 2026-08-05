@@ -1464,6 +1464,69 @@
 ;; implemented is the marker for `applet`/`marquee`/`object`/`template`,
 ;; and that set's docstring says why (no probe distinguishes them).
 
+(def ^:private ignored-structure-tags
+  "Start and end tags dropped outright in FRAGMENT parsing, with their
+   contents continuing in the current parent.
+
+   `parse-into-document` parses a fragment (this file has no html/head/body
+   synthesis at all -- a documented scope cut), and in a fragment these tags
+   name a structure that already exists. Measured in Brave:
+   `<div><body>x</body></div>` is a `<div>` holding the text, with no body
+   element anywhere and the attributes on it discarded, and
+   `<div><head><title>t</title></head>y</div>` drops the `<head>` while
+   KEEPING the `<title>` -- i.e. the tag is ignored, its content is not."
+  #{:html :head :body})
+
+(defn- close-open-anchor
+  "An `<a>` start tag while another `<a>` is open closes it (WHATWG in-body:
+   parse error, run the adoption agency for `a`, then remove that element
+   from the afe list and the stack).
+
+   Measured in Brave: `<a href=/1>1<a href=/2>2</a>` gives two SIBLING
+   anchors, not a nested pair -- and with intervening markup,
+   `<a>one<b>bold</b><a>two</a>tail` keeps `<b>bold</b>` inside the first
+   anchor while the second is its sibling.
+
+   This is the narrow, stack-top-and-below form of the rule rather than the
+   full adoption agency run: the anchor is popped along with anything still
+   open inside it, which is what the measured shapes show. A case where an
+   anchor is mis-nested with a still-open formatting element that must be
+   reconstructed AFTER it is not covered -- the general algorithm is
+   `adoption-agency`, and this predates a reason to route `a` through it."
+  [document stack afe]
+  (if-let [i (loop [i (dec (count stack))]
+               (when (pos? i)
+                 (if (= :a (get-in document [:nodes (nth stack i) :tag]))
+                   i
+                   (recur (dec i)))))]
+    (let [closed (set (subvec stack i))]
+      [(subvec stack 0 i)
+       (vec (remove #(contains? closed %) afe))])
+    [stack afe]))
+
+(defn- normalize-structure-tokens
+  "Two token-level rules from WHATWG's in-body insertion mode, applied
+   before the tree builder sees the stream because neither depends on the
+   stack:
+
+   1. **`</br>` is a START tag.** The spec says an end tag for `br` is a
+      parse error handled by acting as if a `<br>` START tag had been seen.
+      Measured in Brave: `<p>a<br></br>b</p>` produces TWO `<br>`s, and
+      `<p>x</br>y</p>` produces one. It is specific to `br` -- `</img>` is
+      ignored (measured: `<p>a<img></img>b</p>` has a single `<img>`).
+
+   2. **`html`/`head`/`body` tags are dropped in a fragment**, start and
+      end alike, while their contents continue in the current parent (see
+      `ignored-structure-tags`)."
+  [tokens]
+  (keep (fn [{:keys [type tag] :as token}]
+          (let [tag-kw (keyword tag)]
+            (cond
+              (contains? ignored-structure-tags tag-kw) nil
+              (and (= :end type) (= :br tag-kw)) {:type :start :tag "br" :attrs {} :self? true}
+              :else token)))
+        tokens))
+
 (def ^:private formatting-tags
   "WHATWG §13.2.4.2 'Formatting' category -- start tags that push onto the
   list of active formatting elements; end tags that run the adoption agency
@@ -1787,7 +1850,7 @@
     (loop [document document
            stack [root-id]
            afe []
-           tokens (seq (tokenize html))]
+           tokens (seq (normalize-structure-tokens (tokenize html)))]
       (if-let [{:keys [type tag attrs self? text data]} (first tokens)]
         (case type
           ;; A comment is inserted at the current insertion point and
@@ -1861,6 +1924,10 @@
                         (pop-out-of-foreign document stack)
                         stack)
                 foreign? (and foreign? (not (contains? foreign-breakout-tags tag-kw)))
+                ;; <a> inside <a>: the new one closes the open one.
+                [stack afe] (if (= :a tag-kw)
+                              (close-open-anchor document stack afe)
+                              [stack afe])
                 ;; Optional-end-tag auto-closing (see `auto-close-tags`/
                 ;; `auto-close-stack`): if the innermost currently-open
                 ;; element (top of the stack) is one this new start tag

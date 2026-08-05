@@ -2023,3 +2023,35 @@
       (is (= [:template] (mapv :tag (:children table)))
           "the template is the table's only child: no synthesized row group")
       (is (= [:td] (mapv :tag (dom/content-tree doc (:node/id tpl))))))))
+
+(deftest in-body-token-rules-measured-in-brave
+  (testing "an <a> inside an <a> closes the open one"
+    ;; Brave: two SIBLING anchors, not a nested pair.
+    (let [tree (dom/tree (html/parse-into-document "<a href=\"/1\">1<a href=\"/2\">2</a>"))]
+      (is (= [:a :a] (mapv :tag (:children tree))))
+      (is (= [["1"] ["2"]] (mapv :children (:children tree))))))
+  (testing "and it keeps markup that was already inside the first"
+    (let [tree (dom/tree (html/parse-into-document
+                          "<a href=\"/1\">one<b>bold</b><a href=\"/2\">two</a>tail"))
+          [a1 a2 tail] (:children tree)]
+      (is (= :a (:tag a1)))
+      (is (= ["one" :b] (mapv #(if (string? %) % (:tag %)) (:children a1))))
+      (is (= ["two"] (:children a2)))
+      (is (= "tail" tail))))
+  (testing "</br> is a START tag, and only br behaves that way"
+    ;; Brave: `<p>a<br></br>b</p>` has TWO <br>s. `</img>` is ignored, so
+    ;; `<p>a<img></img>b</p>` has one <img> -- the rule is specific to br.
+    (let [p (first (:children (dom/tree (html/parse-into-document "<p>a<br></br>b</p>"))))]
+      (is (= ["a" :br :br "b"] (mapv #(if (string? %) % (:tag %)) (:children p)))))
+    (let [p (first (:children (dom/tree (html/parse-into-document "<p>a<img></img>b</p>"))))]
+      (is (= ["a" :img "b"] (mapv #(if (string? %) % (:tag %)) (:children p))))))
+  (testing "html/head/body tags are dropped in a fragment, their contents are not"
+    ;; The tag names a structure a fragment already has. Brave keeps the
+    ;; text and drops the element, attributes and all -- and keeps a
+    ;; <title> that was inside a dropped <head>.
+    (let [tree (dom/tree (html/parse-into-document "<div><body class=\"c\">x</body></div>"))
+          div (first (:children tree))]
+      (is (= ["x"] (:children div))))
+    (let [tree (dom/tree (html/parse-into-document "<div><head><title>t</title></head>y</div>"))
+          div (first (:children tree))]
+      (is (= [:title "y"] (mapv #(if (string? %) % (:tag %)) (:children div)))))))
