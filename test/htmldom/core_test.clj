@@ -89,30 +89,73 @@
     (is (= #{} (get-in p [:attrs :style-inline-important])))))
 
 ;; ---- inline style `border` shorthand expansion ----
+;;
+;; An inline `style="..."` IS a CSS declaration block, so all of this is
+;; `cssom.core/parse-declarations-with-importance` -- these tests exist to
+;; hold that delegation in place, not to test a second parser. Since
+;; cssom 2026-08-06 a `border` shorthand also writes the twelve PER-SIDE
+;; longhands, which is what real CSS's `border` sets and how declaration
+;; order resolves against a per-side `border-top`; see
+;; `expand-border-shorthand-with-sides` there.
+
+(defn- border-longhands
+  "The twelve per-side border longhands a `border` shorthand writes."
+  [w st c]
+  (into {} (for [side ["top" "right" "bottom" "left"]
+                 [sub v] [["width" w] ["style" st] ["color" c]]]
+             [(keyword (str "border-" side "-" sub)) v])))
 
 (deftest inline-style-border-shorthand-expands-into-its-three-longhands
   ;; The confirmed repro from the bug report: before this, style="border:
   ;; 2px solid red" was stored verbatim as a single, unrecognized :border
   ;; key, which cssom.layout's border-ops never reads -- a real, common
   ;; inline-style border pattern silently painted nothing at all.
-  (is (= {:background "red" :border-width 2 :border-style "solid" :border-color "#00ff00"}
+  (is (= (merge {:background "red" :border-width 2 :border-style "solid"
+                 :border-color "#00ff00"}
+                (border-longhands 2 "solid" "#00ff00"))
          (html/parse-style "background: red; border: 2px solid #00ff00"))))
 
 (deftest inline-style-border-shorthand-is-order-independent
-  (is (= {:border-color "red" :border-width 3 :border-style "dashed"}
+  (is (= (merge {:border-color "red" :border-width 3 :border-style "dashed"}
+                (border-longhands 3 "dashed" "red"))
          (html/parse-style "border: red 3px dashed"))))
 
 (deftest inline-style-border-shorthand-omits-whichever-longhands-it-does-not-specify
-  (is (= {:border-style "solid" :border-color "red"}
+  (is (= (merge {:border-style "solid" :border-color "red"}
+                ;; the UNIFORM keys record only what was written -- but
+                ;; each SIDE gets all three, because a shorthand resets the
+                ;; components it omits to their initial values. Measured in
+                ;; Brave 151 on 2026-08-06: `border: solid` on a 300px
+                ;; block is 306 wide with its <p> at (3,3), i.e. the
+                ;; omitted width IS `medium` = 3px, not 0.
+                (border-longhands "medium" "solid" "red"))
          (html/parse-style "border: solid red"))
       "a real, legal border shorthand may omit the width entirely"))
 
+(deftest inline-style-per-side-border-shorthand-expands-into-that-sides-longhands
+  ;; `border-top` used to fall through to the generic path and be stored as
+  ;; the raw string "10px solid", which nothing reads. Brave 151: a 300px
+  ;; block with `border-top: 10px solid` is 26.797 tall with its <p> at
+  ;; y=10.
+  (is (= {:border-top-width 10 :border-top-style "solid" :border-top-color "#000"}
+         (html/parse-style "border-top: 10px solid #000")))
+  ;; and `border-width`/`border-style`/`border-color` are 1-to-4
+  ;; shorthands, like `margin`/`padding`
+  (is (= {:border-width 10 :border-top-width 10 :border-right-width 5
+          :border-bottom-width 10 :border-left-width 5}
+         (html/parse-style "border-width: 10px 5px"))))
+
 (deftest inline-style-border-shorthand-importance-applies-to-every-expanded-longhand
-  (is (= #{:border-width :border-style :border-color}
+  (is (= (into #{:border-width :border-style :border-color}
+               (keys (border-longhands 2 "solid" "red")))
          (html/style-importance "border: 2px solid red !important"))))
 
 (deftest inline-style-border-longhands-declared-separately-are-unaffected
-  (is (= {:border-width 2 :border-color "#00ff00"}
+  (is (= {:border-width 2 :border-top-width 2 :border-right-width 2
+          :border-bottom-width 2 :border-left-width 2
+          :border-color "#00ff00" :border-top-color "#00ff00"
+          :border-right-color "#00ff00" :border-bottom-color "#00ff00"
+          :border-left-color "#00ff00"}
          (html/parse-style "border-width: 2px; border-color: #00ff00"))))
 
 ;; ---- inline style `margin`/`padding` shorthand expansion ----
