@@ -58,6 +58,73 @@ were in far better shape than "trusted subset only" suggests — the parser
 had quietly grown most of an in-body insertion mode. The remaining failures
 are not scattered; they are two causes.
 
+### 2026-08-06: the parser collapses no whitespace at all
+
+This parser used to collapse runs of spaces and tabs into one space as it
+built text nodes, on the reasoning that space collapsing is HTML-structural
+while newline handling is CSS. An earlier round had already split that
+belief in half — it stopped destroying newlines, because
+`white-space: pre-line`/`pre-wrap` need them — and kept the other half.
+
+The other half is also wrong, and one probe run says so.
+`conformance/ws_probe.cljs` reads text nodes back **codepoint by
+codepoint**, with no normalisation, next to the same markup's rendered box.
+Brave 151, 2026-08-06:
+
+| markup | text node |
+|---|---|
+| `<div>   a   b   </div>` | `SP SP SP a SP SP SP b SP SP SP` |
+| `<div>a⇥b</div>` | `a TAB b` |
+| `<p>a&nbsp;&nbsp;b</p>` | `a NBSP NBSP b` |
+| `<div>\n  <p>a</p>\n</div>` | `LF SP SP` between the two blocks |
+
+Nothing is collapsed. A browser reaches the rendered result by collapsing at
+**layout** time, from `white-space`, which is CSS — and a parser cannot see
+CSS. The whitespace this parser genuinely drops is one rule, not a class:
+
+- **the single leading U+000A after a `<pre>`/`<textarea>` start tag.**
+  Measured to be exactly one and exactly first: `<pre>\nx` is `x`, but
+  `<pre>\n\nx` is `LF x` and `<pre> \nx` is `SP LF x`.
+
+and one rule it REWRITES rather than drops, which is now implemented where
+it belongs:
+
+- **CR and CRLF become LF** (WHATWG 13.2.3.5, input stream preprocessing).
+  `<div>a\r\nb</div>`, `<pre>a\r\nb</pre>` and `<pre>a\rb</pre>` all give
+  `a LF b`, and the `<pre>` shapes render 40px tall — a real line break.
+  Before this, a CR outside a `<pre>` became a SPACE (it was in the
+  collapsing class) and a CR inside one survived as a literal U+000D. It
+  runs on the source before tokenizing, which is the only place that can
+  reach `<pre>` and raw-text content.
+
+Everything else survives, including where the tree builder is actively
+moving nodes around: `<table>\n<tr>` keeps its newlines *inside* the table,
+and `<table> x <tr>` fosters the whole run out because it is not
+whitespace-only — which is exactly what `foster-parented-text?` already
+encoded.
+
+**This axis does not move: 139/139 before and after.** That is the correct
+result rather than a disappointing one — this harness normalises whitespace
+inside text on both sides and compares only that whitespace-only *nodes*
+land in the same places, and nothing about where a node lands changed. The
+axis that can see it is the sibling **cssom** corpus, where three cases had
+been sitting red since 2026-08-05 with a note naming this parser as the
+blocker: a `<span style="white-space: pre">   indented</span>` reached
+layout as `" indented"` and a tab reached it as a space, so the characters
+were gone before CSS could be applied to them. Those three now report
+77/63/35 px — the browser's numbers exactly — and **nothing else in that
+597-case corpus moved**.
+
+Two tests here changed, and both changed because the browser was asked
+rather than because a convention was revised:
+`ordinary-elements-collapse-space-runs-but-keep-newlines` became
+`ordinary-elements-keep-every-whitespace-character` (the assertion is now
+the source string itself), and the half of `nbsp-survives-whitespace-
+collapsing` that asserted *"ordinary spaces and tabs still collapse"* now
+asserts that they arrive verbatim. `preserve-whitespace-context?` is gone:
+it existed to answer "is this a context where text stays verbatim", and
+every context now is.
+
 ### 2026-08-05: the implied `<colgroup>`, found by a DOWNSTREAM corpus
 
 A bare `<col>` — one with no `<colgroup>` written around it — was left as a

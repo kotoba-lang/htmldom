@@ -1538,20 +1538,51 @@
     (is (= ["b\n  c"] (:children span)))
     (is (= "\nd" text-d))))
 
-(deftest ordinary-elements-collapse-space-runs-but-keep-newlines
-  ;; Space and tab runs collapse here; NEWLINES do not. Whether a newline
-  ;; is a line break or just another space is a CSS decision --
-  ;; `white-space: pre-line` breaks on it, `normal` collapses it -- and a
-  ;; parser cannot see CSS. Collapsing them here made `pre-wrap`/`pre-line`
-  ;; impossible to implement at all, because the information was destroyed
-  ;; before layout ever ran; kotoba-lang/cssom's conformance harness scored
-  ;; both as permanent failures against a real browser. cssom.layout now
-  ;; collapses newlines for `normal`/`nowrap`, which is where the decision
-  ;; belongs.
+(deftest ordinary-elements-keep-every-whitespace-character
+  ;; This test used to assert `["Hello\n world \n again"]` -- newlines kept
+  ;; (an earlier round had already recognised those as a CSS decision) and
+  ;; space/tab RUNS collapsed to one space, on the reasoning that space
+  ;; collapsing was HTML-structural where newline handling was not.
+  ;;
+  ;; Measured, that reasoning was wrong about its own half. Brave 151,
+  ;; 2026-08-06, `<div>   a   b   </div>` through the HTML fragment parsing
+  ;; algorithm gives the text node the codepoints
+  ;; `SP SP SP a SP SP SP b SP SP SP` -- the parser collapses NOTHING. A
+  ;; browser reaches the same rendered result by collapsing at layout time,
+  ;; from `white-space`, which is CSS and which a parser cannot see.
+  ;;
+  ;; So the number here changed because the browser was asked, not because
+  ;; a convention changed: the assertion is now the source string itself.
   (let [document (html/parse-into-document "<p>Hello\n   world  \n  again</p>")
         tree (dom/tree document)
         p (first (:children tree))]
-    (is (= ["Hello\n world \n again"] (:children p)))))
+    (is (= ["Hello\n   world  \n  again"] (:children p)))))
+
+(deftest carriage-returns-normalize-to-line-feeds
+  ;; WHATWG 13.2.3.5 input stream preprocessing, and the one whitespace
+  ;; rewrite this parser DOES perform. Measured in Brave 151, 2026-08-06:
+  ;; `<div>a\r\nb</div>`, `<pre>a\r\nb</pre>` and `<pre>a\rb</pre>` all give
+  ;; the codepoints `a LF b`, and both `<pre>` shapes render 40px tall --
+  ;; a real line break rather than a stray control character.
+  ;;
+  ;; Both halves are load-bearing and neither was right before. Outside a
+  ;; preserving context a CR was folded into the collapsing class and came
+  ;; out a SPACE; inside one it survived as a literal U+000D. It is now the
+  ;; same LINE FEED in both, because the rewrite happens on the source
+  ;; before tokenizing rather than in the tree builder's text path -- which
+  ;; is also the only place that can reach `<pre>` and raw-text content.
+  (let [text-of (fn [html]
+                  (->> (vals (:nodes (html/parse-into-document html)))
+                       (filter #(= :text (:node/type %)))
+                       (map :text)
+                       (str/join "")))]
+    (is (= "a\nb" (text-of "<div>a\r\nb</div>")) "CRLF is one LINE FEED")
+    (is (= "a\nb" (text-of "<div>a\rb</div>")) "a lone CR is a LINE FEED")
+    (is (= "a\nb" (text-of "<pre>a\r\nb</pre>")) "and inside <pre> too")
+    ;; The `<pre>` leading-newline drop is applied to the NORMALISED text,
+    ;; so a source that opens with CRLF loses that one line feed exactly as
+    ;; one written with a bare LF does.
+    (is (= "x" (text-of "<pre>\r\nx</pre>")))))
 
 (deftest script-and-textarea-content-stay-verbatim-without-regression
   ;; No-regression check, the one genuinely at risk from this fix: moving
@@ -1810,19 +1841,30 @@
   ;; U+00A0 -- so the entity was decoded correctly and then immediately
   ;; rewritten back into a collapsible ordinary space, destroying the one
   ;; thing `&nbsp;` exists to do.
+  ;;
+  ;; The class that did that is gone entirely now (nothing in this file
+  ;; collapses whitespace any more), so this reads as the regression gate it
+  ;; always was: a decoded U+00A0 must arrive as U+00A0.
   (let [doc (html/parse-into-document "<p>a&nbsp;b</p>")
         text (->> (vals (:nodes doc))
                   (filter #(= :text (:node/type %)))
                   (map :text)
                   (str/join ""))]
     (is (= [97 160 98] (mapv int text))))
+  ;; This half used to assert `"a b"` -- "ordinary spaces and tabs still
+  ;; collapse" -- and it is the assertion that changed, because the
+  ;; behaviour it named was measured and found not to be a parser
+  ;; behaviour at all. Brave 151, 2026-08-06: `<div>a\tb</div>` gives the
+  ;; codepoints `a TAB b`, not `a SP b`. The tab reaching layout intact is
+  ;; the whole point -- in a `white-space: pre` box `a<tab>b` is 63px (nine
+  ;; columns to the next `tab-size: 8` stop) where one space would be 21.
   (let [doc (html/parse-into-document "<p>a  \t b</p>")
         text (->> (vals (:nodes doc))
                   (filter #(= :text (:node/type %)))
                   (map :text)
                   (str/join ""))]
-    (is (= "a b" text)
-        "ordinary spaces and tabs still collapse")))
+    (is (= "a  \t b" text)
+        "spaces and tabs arrive verbatim; `white-space` decides what happens to them")))
 
 ;; ---- foster parenting + implied row structure (WHATWG 13.2.6.1) --------
 ;;

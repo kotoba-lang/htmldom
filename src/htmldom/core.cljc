@@ -514,9 +514,32 @@
                      (when-let [d (char-at html (+ lt 2))]
                        (some? (re-matches #"[A-Za-z]" d)))))))))
 
+(defn- normalize-newlines
+  "WHATWG 13.2.3.5, the input stream preprocessor: a U+000D CARRIAGE RETURN
+   followed by U+000A LINE FEED is replaced by a single LINE FEED, and any
+   remaining lone CARRIAGE RETURN is replaced by a LINE FEED.
+
+   This runs on the WHOLE source, before tokenizing, which is what the spec
+   says and also what makes it right inside `<pre>` and the raw-text
+   elements -- their content never passes through the tree builder's text
+   path, so a rule applied there would miss them. Measured in Brave 151,
+   2026-08-06 (conformance/ws_probe.cljs, cases `pre with CRLF` / `pre with
+   CR` / `div with CR`): `<pre>a\\r\\nb</pre>`, `<pre>a\\rb</pre>` and
+   `<div>a\\rb</div>` all produce the codepoints `a LF b`, and the two
+   `<pre>` shapes render 40px tall -- a real line break, not a stray
+   control character.
+
+   Before this, a CR outside a preserving context was folded into the
+   whitespace-collapsing class (becoming a SPACE, so `a\\rb` was `a b`), and
+   inside one it survived verbatim as a U+000D no consumer could render.
+   Neither is what a browser builds, and the difference only became
+   reachable once collapsing moved out of the parser."
+  [html]
+  (str/replace html #"\r\n?" "\n"))
+
 (defn tokenize
   [html]
-  (let [html (or html "")
+  (let [html (normalize-newlines (or html ""))
         len (count html)
         ;; Text accumulates from `pos` and is only flushed when real markup
         ;; is reached, so a literal `<` (see `markup-start?`) stays INSIDE
@@ -1437,21 +1460,23 @@
 ;; which is where the change belonged -- it is a change to the formatting
 ;; algorithms, not to table handling, and nothing in THIS block moved.
 
-(defn- preserve-whitespace-context?
-  "Whether the CURRENT stack means whitespace in an about-to-be-created
-   text node must be preserved verbatim rather than collapsed to single
-   spaces: either (a) the innermost open element is a raw-text/RCDATA tag
-   (`<script>`/`<style>`/`<title>`/`<textarea>`) -- their own text content
-   always arrives here as a single, tag-less `:text` token via
-   `tokenize`'s separate raw-text-scanning branch (see `raw-text-tags`),
-   and was ALREADY verbatim before whitespace collapsing moved into this
-   fn, so it must stay that way -- or (b) a real `<pre>` is anywhere in
-   the stack (not just the immediate parent: a `<span>`/`<code>` nested
-   inside a `<pre>` still needs its OWN text preserved, since `<pre>`,
-   unlike raw-text tags, allows real nested markup)."
-  [document stack]
-  (or (contains? raw-text-tags (name (get-in document [:nodes (peek stack) :tag])))
-      (some #(= :pre (get-in document [:nodes % :tag])) stack)))
+;; `preserve-whitespace-context?` USED TO LIVE HERE and is deliberately
+;; gone. It answered "is the current stack one where text must stay
+;; verbatim" -- a raw-text tag, or anywhere inside a `<pre>` -- and it was
+;; the switch that decided whether the tree builder's :text branch
+;; collapsed runs of spaces.
+;;
+;; It is dead because that branch no longer collapses anything in any
+;; context (see the :text case in `parse-into-document` for the browser
+;; measurements that removed it), so every context is now the preserving
+;; one and there is nothing left to ask.
+;;
+;; Worth naming what its removal does NOT change: `<pre>` is still special,
+;; and so are the raw-text tags. `<pre>`'s single leading newline is still
+;; dropped in the :start branch, `<textarea>`'s in `tokenize`, and raw text
+;; still bypasses tag scanning entirely. What is no longer true is that
+;; `<pre>` is the only place a space run survives -- it survives
+;; everywhere, and `white-space` decides what is done with it.
 
 ;; ============================================================
 ;; Active formatting elements + adoption agency (WHATWG §13.2.4.3, §13.2.6.4.7)
@@ -1895,37 +1920,54 @@
             (recur document stack afe (next tokens)))
 
           :text
-          (let [text (if (preserve-whitespace-context? document stack)
-                       text
-                       ;; Collapse runs of spaces/tabs, but KEEP newlines:
-                       ;; whether a newline is a line break or just another
-                       ;; space is a CSS decision (`white-space: pre-line`
-                       ;; breaks on it, `normal` collapses it), and a parser
-                       ;; cannot see CSS. Destroying newlines here made
-                       ;; `white-space: pre-wrap`/`pre-line` impossible to
-                       ;; implement at all -- the information was gone
-                       ;; before layout ever ran. cssom.layout collapses
-                       ;; them for `normal`/`nowrap`, which is where that
-                       ;; decision belongs.
-                       ;;
-                       ;; The character class is spelled out rather than
-                       ;; written as `[^\S\n]` (everything `\s` matches
-                       ;; except newline), because `\s` ALSO matches U+00A0
-                       ;; NO-BREAK SPACE -- so `&nbsp;`, having just been
-                       ;; correctly decoded to U+00A0 by `decode-entities`,
-                       ;; was immediately rewritten back to an ordinary
-                       ;; U+0020 and became collapsible again. That destroys
-                       ;; the one thing `&nbsp;` exists to do, and CSS says
-                       ;; so explicitly: only spaces, tabs and segment breaks
-                       ;; are collapsible white space; U+00A0 is not.
-                       ;; Measured against a real browser by the conformance
-                       ;; harness (case `entity/nbsp-is-not-collapsible`):
-                       ;; `<p>a&nbsp;b</p>` gave the browser codepoints
-                       ;; 97/160/98 and this parser 97/32/98. The class below
-                       ;; is exactly HTML's own "ASCII whitespace" set minus
-                       ;; the newline this deliberately keeps.
-                       (str/replace text #"[ \t\f\r]+" " "))
-                [document stack afe] (reconstruct-active-formatting document stack afe)
+          ;; TEXT IS VERBATIM. No whitespace is collapsed here, in any
+          ;; context, because a real HTML parser collapses none of it: the
+          ;; question 'how many of these spaces are rendered' is
+          ;; `white-space`'s, and `white-space` is CSS, which a parser
+          ;; cannot see.
+          ;;
+          ;; This used to collapse runs of spaces/tabs (keeping newlines,
+          ;; which an earlier round had already recognised as a CSS
+          ;; decision) on the reasoning that space collapsing was
+          ;; HTML-STRUCTURAL. Measured in Brave 151, 2026-08-06
+          ;; (conformance/ws_probe.cljs, round A), it is not -- the browser's
+          ;; own DOM keeps every character:
+          ;;
+          ;;   <div>   a   b   </div>          SP SP SP a SP SP SP b SP SP SP
+          ;;   <div>a\tb</div>                 a TAB b
+          ;;   <p>a&nbsp;&nbsp;b</p>           a NBSP NBSP b
+          ;;   <div>\n  <p>a</p>\n</div>       #text "\n  " between the blocks
+          ;;
+          ;; The parser drops whitespace in exactly TWO places, and both are
+          ;; implemented elsewhere in this file rather than here:
+          ;;
+          ;;   1. the single leading U+000A after a `<pre>`/`<textarea>`
+          ;;      start tag (the `remaining` rebinding in the :start branch,
+          ;;      and `tokenize`'s raw-text branch). Measured: `<pre>\nx` is
+          ;;      `x` but `<pre>\n\nx` is `LF x` and `<pre> \nx` is `SP LF x`
+          ;;      -- one newline, only when it is the very first character.
+          ;;   2. nothing else. Whitespace-only runs survive even where the
+          ;;      tree builder is moving nodes around: `<table>\n<tr>` keeps
+          ;;      its newlines INSIDE the table (`foster-parented-text?`
+          ;;      already encodes exactly this), and `<table> x <tr>` fosters
+          ;;      the whole run out because it is not whitespace-only.
+          ;;
+          ;; What collapsing here cost was everything downstream that needs
+          ;; the characters: `white-space: pre` on an element that is not a
+          ;; `<pre>` saw `" indented"` where the source said `"   indented"`,
+          ;; and a tab arrived as a space, so `pre`/`pre-wrap`/`break-spaces`
+          ;; could not be implemented correctly at all no matter what
+          ;; cssom.layout did.
+          ;;
+          ;; The safety property that lets this be deleted rather than
+          ;; conditionalised: for `white-space: normal`/`nowrap`, cssom.layout
+          ;; collapses every whitespace run to one space itself, and
+          ;; collapsing a run that was already partly collapsed gives the same
+          ;; single space -- so the text every ordinary corpus case sees is
+          ;; byte-identical either way. `&nbsp;` is safe for the same reason
+          ;; it was safe before: U+00A0 is not in anyone's collapsible set,
+          ;; and now it is not in a class this file applies at all.
+          (let [[document stack afe] (reconstruct-active-formatting document stack afe)
                 [id document] (dom/create-text-node document text)]
             ;; Asked AFTER reconstructing, deliberately: reconstructing is
             ;; itself an insertion, so a formatting element reopened in
