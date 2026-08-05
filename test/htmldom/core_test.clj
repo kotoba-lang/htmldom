@@ -143,26 +143,44 @@
          (html/parse-style "margin: 1px 2px 3px 4px"))
       "four values are clockwise from the top"))
 
-(deftest inline-style-box-shorthand-this-engine-cannot-resolve-stays-unexpanded
+(deftest inline-style-box-shorthand-carries-a-non-length-into-its-longhands
+  ;; RENAMED from `...-this-engine-cannot-resolve-stays-unexpanded` on
+  ;; 2026-08-06, because nothing is left in it that stays unexpanded --
+  ;; and both halves changed for the same reason, which is worth stating
+  ;; once rather than twice.
+  ;;
   ;; `margin: 0 auto` USED to stay unexpanded here, on the reasoning that
   ;; `auto` needs real layout against the container so the parser should
   ;; degrade rather than guess a number. The guess was never the only
   ;; option: `auto` is a keyword, and expanding to longhands that CARRY the
   ;; keyword loses nothing and lets layout do the resolving.
   ;;
-  ;; kotoba-lang/cssom made that change (its `expand-box-side-shorthand`
-  ;; now admits `auto` for `margin` only -- `padding: auto` is not CSS),
-  ;; and this parser delegates all style parsing to `cssom.core`, so the
-  ;; behaviour arrives here. Measured consequence in the layout engine: a
-  ;; `margin: 0 auto` block is now centred, which it was not before.
+  ;; A PERCENTAGE is the same shape of value and used to be the half that
+  ;; still degraded ("10% of WHAT is not knowable at parse time" -- true,
+  ;; and equally true of `auto`). kotoba-lang/cssom now admits it for the
+  ;; same reason, having taught cssom.layout to resolve one against the
+  ;; containing block's inline size; measured in Brave 151, `padding: 10%
+  ;; 20%` inside a 300x100 block is 30px top/bottom and 60px left/right --
+  ;; BOTH axes of the width -- so per-side expansion is exactly as well
+  ;; defined for a percentage as for a px length, and each side carries the
+  ;; raw "10%" through to layout exactly as `auto` already did.
   ;;
-  ;; The half that still degrades is the percentage below, and for the
-  ;; original reason: 10% of WHAT is not knowable at parse time.
+  ;; This parser delegates all style parsing to `cssom.core`, so both
+  ;; behaviours arrive here rather than being implemented here. Measured
+  ;; consequences in the layout engine: a `margin: 0 auto` block is
+  ;; centred, and `padding-bottom: 50%` makes the 300x150 aspect-ratio box
+  ;; a browser makes.
   (is (= {:margin 0 :margin-top 0 :margin-right "auto"
           :margin-bottom 0 :margin-left "auto"}
          (html/parse-style "margin: 0 auto"))
       "auto survives as a keyword in the longhands, for layout to resolve")
-  (is (= {:padding "10%"} (html/parse-style "padding: 10%"))))
+  (is (= {:padding "10%" :padding-top "10%" :padding-right "10%"
+          :padding-bottom "10%" :padding-left "10%"}
+         (html/parse-style "padding: 10%"))
+      "a percentage survives the same way, for layout to resolve")
+  ;; Genuinely unresolvable input still degrades rather than guessing.
+  (is (= {:margin "1px solid 3px dashed"}
+         (html/parse-style "margin: 1px solid 3px dashed"))))
 
 (deftest inline-style-padding-shorthand-through-the-full-document-parse
   ;; The end-to-end shape the box model actually reads, not just
