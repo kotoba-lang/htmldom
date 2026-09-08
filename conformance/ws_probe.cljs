@@ -44,7 +44,7 @@
             ["node:os" :as os]
             ["node:path" :as path]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (def browser-candidates
   ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
