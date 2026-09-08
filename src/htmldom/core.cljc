@@ -8,7 +8,7 @@
    kotoba-lang/html, an unrelated Hiccup-compatible EDN HTML renderer (data ->
    HTML text); this namespace goes the other direction: parses HTML text into
    a kotoba.wasm.dom document."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [cssom.core :as css]
             [kotoba.wasm.dom :as dom]))
 
@@ -276,7 +276,7 @@
   [s]
   (->> (re-seq #"([A-Za-z_:][-A-Za-z0-9_:.]*)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+)))?" s)
        (map (fn [[_ k dq sq bare]]
-              [(keyword (str/lower-case k))
+              [(keyword (str/lower k))
                (if-let [v (or dq sq bare)]
                  (decode-entities v true)
                  ;; Real WHATWG HTML tokenization: a valueless/bare
@@ -363,7 +363,7 @@
                       (not (unquoted-value-tail? (subs body 0 (dec (count body))))))
           body (str/trim (if slash? (subs body 0 (dec (count body))) body))
           [tag attr-text] (str/split body #"\s+" 2)
-          tag (str/lower-case (or tag ""))
+          tag (str/lower (or tag ""))
           self? (contains? void-tags tag)]
       (if closing?
         {:type :end :tag tag}
@@ -458,7 +458,7 @@
     (when-not (or (str/starts-with? body "/")
                   (str/starts-with? body "!")
                   (str/starts-with? body "?"))
-      (raw-text-tags (str/lower-case (first (str/split body #"[\s/>]" 2)))))))
+      (raw-text-tags (str/lower (first (str/split body #"[\s/>]" 2)))))))
 
 (defn- raw-text-close-index
   "Index of the '<' beginning the literal, case-insensitive closing tag
@@ -468,9 +468,9 @@
    (count html) if unterminated (rest of input becomes the element's text,
    as browsers do for an unterminated <script>/<style> at EOF)."
   [html tag from]
-  (let [lower (str/lower-case html)
+  (let [lower (str/lower html)
         len (count html)
-        needle (str "</" (str/lower-case tag))
+        needle (str "</" (str/lower tag))
         needle-len (count needle)
         boundary-chars #{" " "\t" "\n" "\r" ">" "/"}]
     (loop [pos from]
@@ -689,7 +689,7 @@
       (= "" v)
       (and (string? v)
            (not (str/blank? v))
-           (not= "false" (str/lower-case v)))))
+           (not= "false" (str/lower v)))))
 
 (defn- set-attribute-if-missing
   [document id k v]
@@ -790,7 +790,7 @@
   (let [node (get-in document [:nodes id])
         attrs (:attrs node)
         tag (:tag node)
-        input-type (str/lower-case (str (or (:type attrs) "")))]
+        input-type (str/lower (str (or (:type attrs) "")))]
     (case tag
       :input
       (cond-> document
@@ -1165,7 +1165,7 @@
    `<table><input type=\"text\">...` put it before the table."
   [tag-kw attrs]
   (and (= :input tag-kw)
-       (= "hidden" (some-> (:type attrs) str/lower-case))))
+       (= "hidden" (some-> (:type attrs) str/lower))))
 
 (defn- innermost-index
   "Index in `stack` of the innermost (topmost) open element whose tag is in
