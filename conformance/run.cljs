@@ -45,7 +45,7 @@
             ["node:os" :as os]
             ["node:path" :as path]
             [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
@@ -353,8 +353,8 @@
 
 (defn- norm-attrs [tag a]
   (let [drop? (into ignored-attrs (get ignored-attrs-by-tag tag #{}))]
-    (into {} (comp (remove (fn [[k _]] (contains? drop? (str/lower-case (name k)))))
-                   (map (fn [[k v]] [(str/lower-case (name k)) (str v)])))
+    (into {} (comp (remove (fn [[k _]] (contains? drop? (str/lower (name k)))))
+                   (map (fn [[k v]] [(str/lower (name k)) (str v)])))
           a)))
 
 (defn- coalesce-text
