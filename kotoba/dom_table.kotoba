@@ -1,0 +1,2 @@
+(ns dom-table (:export [main]))
+(defn main [] :i64 0)
