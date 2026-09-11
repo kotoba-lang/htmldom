@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Generates `kotoba/entity_data.kotoba` from `src/htmldom/core.cljk`.
 ;;
 ;; The named-character-reference table is 83 entries. A Kotoba typed map holds
@@ -17,7 +17,7 @@
 ;; ⚠ GENERATED. Do not hand-edit `kotoba/entity_data.kotoba`. `--check` fails
 ;; when it is stale, which is the same discipline `manifest/west.yml` is under.
 ;;
-;;   nbb scripts/gen_entity_table.cljk [--check]
+;;   kbb --backend sci scripts/gen_entity_table.cljk [--check]
 
 (ns gen-entity-table
   (:require ["node:fs" :as fs]

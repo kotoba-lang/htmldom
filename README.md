@@ -21,13 +21,13 @@ default-selected initialization). See the `htmldom.core` docstring.
 | | |
 |---|---|
 | Role | ui-substrate |
-| Tests | `clojure -M:test` |
+| Tests | `kbb -M:test` |
 | WHATWG HTML compatibility | not a goal (trusted subset only) — **measured at 94% tree shape** vs a real headless Blink browser, see `conformance/` |
 
 ## Test
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```
 
 ## Conformance
@@ -38,5 +38,5 @@ headless Blink browser (Brave, over CDP) and compares the tree shape, so
 `conformance/README.md`.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk
+kbb --backend sci --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk
 ```

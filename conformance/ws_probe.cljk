@@ -31,7 +31,7 @@
    because its constraints were measured there and have not changed.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/ws_probe.cljk \\
+     kbb --backend sci --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/ws_probe.cljk \\
        <shapes.edn> [--browser <path>]
 
    A shape is `{:name \"...\" :html \"...\" :wrap \"<css for the wrapper>\"}`.

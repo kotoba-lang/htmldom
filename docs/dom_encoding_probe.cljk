@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Which shape can a Kotoba `:document` actually hold a DOM in?
 ;;
 ;; This repo is the next whole-component migration to Kotoba, and the obvious
@@ -13,7 +13,7 @@
 ;; counts one, a map charges its keys as nodes too, and the root sits at depth
 ;; 0 with the walk refusing above `document-depth-limit`.
 ;;
-;;   nbb docs/dom_encoding_probe.cljk
+;;   kbb --backend sci docs/dom_encoding_probe.cljk
 
 (ns dom-encoding-probe
   (:require ["node:fs" :as fs]))
