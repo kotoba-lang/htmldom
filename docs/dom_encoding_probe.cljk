@@ -13,7 +13,7 @@
 ;; counts one, a map charges its keys as nodes too, and the root sits at depth
 ;; 0 with the walk refusing above `document-depth-limit`.
 ;;
-;;   nbb docs/dom_encoding_probe.cljs
+;;   nbb docs/dom_encoding_probe.cljk
 
 (ns dom-encoding-probe
   (:require ["node:fs" :as fs]))

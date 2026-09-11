@@ -3,7 +3,7 @@
   ;;
   ;; ## Why not a tree
   ;;
-  ;; `docs/dom_encoding_probe.cljs` measures it: a nested `:document` mirroring
+  ;; `docs/dom_encoding_probe.cljk` measures it: a nested `:document` mirroring
   ;; the element tree fails on DEPTH at FOUR element levels, and this repo's
   ;; conformance corpus reaches six. Tree depth becomes document depth, one
   ;; element level costs about 2.2 of them, and 9 levels is all there is

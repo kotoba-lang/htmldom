@@ -22,7 +22,7 @@
    have produced (so run.cljs parses one format, not two), and kills the
    browser.
 
-   Usage: nbb conformance/cdp_dump.cljs <browser-binary> <file-path>
+   Usage: nbb conformance/cdp_dump.cljk <browser-binary> <file-path>
                                         [<out-file>]
    Writes the wrapped block to <out-file> (stdout if omitted -- see emit!,
    stdout is only safe for a human at a terminal); exits non-zero with a
@@ -191,5 +191,5 @@
   (if (and browser file)
     (run! browser file out-file)
     (do (binding [*print-fn* *print-err-fn*]
-          (println "usage: nbb conformance/cdp_dump.cljs <browser-binary> <file-path> [<out-file>]"))
+          (println "usage: nbb conformance/cdp_dump.cljk <browser-binary> <file-path> [<out-file>]"))
         (js/process.exit 2))))
