@@ -8,7 +8,7 @@ tag names and nesting depth in document order, plus text nodes normalised
 for whitespace, plus comments.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk \
+kbb --backend sci --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk \
   [--browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] \
   [--only table/] [--verbose] [--ledger path/to/ledger.edn]
 ```
