@@ -523,7 +523,7 @@
    says and also what makes it right inside `<pre>` and the raw-text
    elements -- their content never passes through the tree builder's text
    path, so a rule applied there would miss them. Measured in Brave 151,
-   2026-08-06 (conformance/ws_probe.cljs, cases `pre with CRLF` / `pre with
+   2026-08-06 (conformance/ws_probe.cljk, cases `pre with CRLF` / `pre with
    CR` / `div with CR`): `<pre>a\\r\\nb</pre>`, `<pre>a\\rb</pre>` and
    `<div>a\\rb</div>` all produce the codepoints `a LF b`, and the two
    `<pre>` shapes render 40px tall -- a real line break, not a stray
@@ -1930,7 +1930,7 @@
           ;; which an earlier round had already recognised as a CSS
           ;; decision) on the reasoning that space collapsing was
           ;; HTML-STRUCTURAL. Measured in Brave 151, 2026-08-06
-          ;; (conformance/ws_probe.cljs, round A), it is not -- the browser's
+          ;; (conformance/ws_probe.cljk, round A), it is not -- the browser's
           ;; own DOM keeps every character:
           ;;
           ;;   <div>   a   b   </div>          SP SP SP a SP SP SP b SP SP SP

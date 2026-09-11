@@ -8,7 +8,7 @@
   ;; each time: the bound that binds is the CONTAINER, not the bytes.
   ;;
   ;; The table is generated from the `.cljc` by
-  ;; `scripts/gen_entity_table.cljs`, so the two cannot drift; `--check` fails
+  ;; `scripts/gen_entity_table.cljk`, so the two cannot drift; `--check` fails
   ;; when it is stale. It is required rather than inlined, which is only
   ;; possible since kotoba-lang/amu#912 -- before that a module could be
   ;; required but this one would have had to be pasted in.

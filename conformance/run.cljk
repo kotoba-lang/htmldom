@@ -37,7 +37,7 @@
        cannot run anything.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/run.cljs \\
+     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/run.cljk \\
        [--browser <path to Chrome/Brave binary>] [--only table/] \\
        [--ledger path/to/ledger.edn] [--verbose]"
   (:require ["node:child_process" :as cp]
@@ -158,7 +158,7 @@
 
 (defn- run-cdp!
   "Reads the measurement block by driving the browser over the DevTools
-   protocol (conformance/cdp_dump.cljs, ported from the sibling cssom
+   protocol (conformance/cdp_dump.cljk, ported from the sibling cssom
    harness along with the reason it exists).
 
    Primary transport, not a fallback: Brave 151's `--dump-dom` produces
@@ -169,7 +169,7 @@
    it does not wait on a headless Chromium to exit, which it never does."
   [browser file]
   (let [out-file (path/join (fs/mkdtempSync (path/join (os/tmpdir) "kotoba-htmldom-cdp-")) "block.html")
-        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljs" browser file out-file]
+        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljk" browser file out-file]
                           #js {:encoding "utf8" :timeout 240000})
         out (if (fs/existsSync out-file) (fs/readFileSync out-file "utf8") "")]
     (when-not (str/includes? out "kotoba-htmldom-conformance-out")

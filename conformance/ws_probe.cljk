@@ -5,7 +5,7 @@
    'layout collapsed it'.
 
    That separation is the whole reason this exists and is why
-   conformance/run.cljs cannot answer it: that harness deliberately
+   conformance/run.cljk cannot answer it: that harness deliberately
    NORMALISES whitespace inside text on both sides (see its README,
    'Exact whitespace inside text'), because how many spaces survive is a
    `white-space` question and `white-space` is CSS. Which is correct for
@@ -31,7 +31,7 @@
    because its constraints were measured there and have not changed.
 
    Usage:
-     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/ws_probe.cljs \\
+     nbb --classpath \"src:<dom-gpu>/src:<cssom>/src\" conformance/ws_probe.cljk \\
        <shapes.edn> [--browser <path>]
 
    A shape is `{:name \"...\" :html \"...\" :wrap \"<css for the wrapper>\"}`.
@@ -128,7 +128,7 @@
 
 (defn- run-cdp! [browser file]
   (let [out-file (path/join (fs/mkdtempSync (path/join (os/tmpdir) "ws-probe-")) "block.html")
-        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljs" browser file out-file]
+        res (cp/spawnSync "nbb" #js ["conformance/cdp_dump.cljk" browser file out-file]
                           #js {:encoding "utf8" :timeout 240000})
         out (if (fs/existsSync out-file) (fs/readFileSync out-file "utf8") "")]
     (when-not (str/includes? out "kotoba-htmldom-conformance-out")

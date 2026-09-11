@@ -8,7 +8,7 @@ tag names and nesting depth in document order, plus text nodes normalised
 for whitespace, plus comments.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljs \
+nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk \
   [--browser "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] \
   [--only table/] [--verbose] [--ledger path/to/ledger.edn]
 ```
@@ -67,7 +67,7 @@ belief in half — it stopped destroying newlines, because
 `white-space: pre-line`/`pre-wrap` need them — and kept the other half.
 
 The other half is also wrong, and one probe run says so.
-`conformance/ws_probe.cljs` reads text nodes back **codepoint by
+`conformance/ws_probe.cljk` reads text nodes back **codepoint by
 codepoint**, with no normalisation, next to the same markup's rendered box.
 Brave 151, 2026-08-06:
 

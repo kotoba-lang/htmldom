@@ -38,5 +38,5 @@ headless Blink browser (Brave, over CDP) and compares the tree shape, so
 `conformance/README.md`.
 
 ```bash
-nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljs
+nbb --classpath "src:../dom-gpu/src:../cssom/src" conformance/run.cljk
 ```

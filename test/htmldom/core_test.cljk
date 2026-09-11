@@ -1869,7 +1869,7 @@
 ;; ---- foster parenting + implied row structure (WHATWG 13.2.6.1) --------
 ;;
 ;; Every assertion below records what a real Brave 151 built for the same
-;; markup, read through conformance/cdp_dump.cljs (innerHTML on a detached
+;; markup, read through conformance/cdp_dump.cljk (innerHTML on a detached
 ;; <div>, i.e. the HTML fragment parsing algorithm). Four of these shapes
 ;; are also conformance corpus cases; the rest are shapes the corpus does
 ;; not carry, measured the same way while working out how far the stack-
@@ -1912,7 +1912,7 @@
   ;; Mixed text and formatting keeps its order too (Brave: "a", <b>c</b>,
   ;; "d", table). The text nodes are separate here and merged in Brave --
   ;; a node-boundary difference this parser has everywhere, not a shape
-  ;; one; conformance/run.cljs coalesces both sides before comparing.
+  ;; one; conformance/run.cljk coalesces both sides before comparing.
   (is (= ["a" [:b "c"] "d" [:table [:tbody [:tr [:td "x"]]]]]
          (parsed-shape "<table>a<b>c</b>d<tr><td>x</td></tr></table>"))))
 
