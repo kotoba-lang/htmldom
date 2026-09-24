@@ -1,6 +1,6 @@
 (ns htmldom.core-test
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 

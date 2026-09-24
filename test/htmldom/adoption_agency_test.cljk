@@ -4,7 +4,7 @@
   parser fixes via the list of active formatting elements + reconstruct +
   the adoption agency algorithm. Each expected tree was verified against
   real browser behavior (html5lib / Chrome / Firefox) before encoding."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [htmldom.core :as html]
             [kotoba.wasm.dom :as dom]))
 
